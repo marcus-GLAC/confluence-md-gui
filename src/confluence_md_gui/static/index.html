@@ -30,6 +30,8 @@
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
   <symbol id="i-github" viewBox="0 0 16 16"><path stroke="none" fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></symbol>
   <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></symbol>
 </svg>
 
@@ -183,9 +185,16 @@
           <p class="hint" id="file-count"></p>
           <ul id="file-list"></ul>
         </aside>
-        <article id="preview-body" class="markdown">
-          <div class="empty"><svg><use href="#i-file"/></svg><p>Chọn một file bên trái để xem nội dung.</p></div>
-        </article>
+        <div class="preview-main">
+          <div id="preview-toolbar" class="preview-toolbar" hidden>
+            <div class="pt-name"><b id="pt-title"></b><small id="pt-sub"></small></div>
+            <button type="button" class="ghost small" id="pt-rename"><svg><use href="#i-edit"/></svg>Đổi tên</button>
+            <button type="button" class="ghost small danger-text" id="pt-delete"><svg><use href="#i-trash"/></svg>Xoá</button>
+          </div>
+          <article id="preview-body" class="markdown">
+            <div class="empty"><svg><use href="#i-file"/></svg><p>Chọn một file bên trái để xem nội dung.</p></div>
+          </article>
+        </div>
       </div>
       <div class="panel-actions">
         <button class="secondary next" data-goto="github">Tiếp tục<svg><use href="#i-arrow"/></svg></button>
@@ -268,6 +277,23 @@
         </details>
       </div>
 
+      <!-- Tài liệu -->
+      <div class="card" id="gh-docs-card">
+        <div class="card-title"><span class="num-badge">3</span>Chọn tài liệu
+          <span class="hint push-right" id="docs-summary"></span></div>
+        <div class="docs-toolbar">
+          <div class="input-group">
+            <span class="input-icon"><svg><use href="#i-search"/></svg></span>
+            <input id="docs-search" placeholder="Tìm tài liệu…" autocomplete="off">
+          </div>
+          <button type="button" class="ghost small" id="docs-all">Chọn tất cả</button>
+          <button type="button" class="ghost small" id="docs-none">Bỏ chọn</button>
+          <button type="button" class="ghost icon-only" id="docs-reload" title="Tải lại"><svg><use href="#i-refresh"/></svg></button>
+        </div>
+        <div id="docs-tree" class="docs-tree"></div>
+        <p class="hint">Ảnh và tệp đính kèm của tài liệu được chọn sẽ tự đi kèm. Link tới tài liệu không được chọn sẽ trỏ về trang Confluence gốc.</p>
+      </div>
+
       <div id="push-result" class="card result" hidden>
         <div class="result-head"><span class="badge-icon ok"><svg><use href="#i-check"/></svg></span>
           <div><h3>Đã đưa lên GitHub</h3><p id="push-result-text"></p></div>
@@ -307,6 +333,41 @@
   <div class="dialog-actions">
     <button class="secondary" id="device-cancel">Huỷ</button>
     <a class="button primary" id="device-open" target="_blank" rel="noopener">Mở GitHub<svg><use href="#i-external"/></svg></a>
+  </div>
+</dialog>
+
+<dialog id="rename-dialog">
+  <form method="dialog" id="rename-form">
+    <div class="dialog-body">
+      <span class="badge-icon info-badge"><svg><use href="#i-edit"/></svg></span>
+      <h3>Đổi tên tài liệu</h3>
+      <p>Tên mới dùng khi đưa lên GitHub. File trên máy vẫn giữ tên gốc để lần export sau không bị trùng.</p>
+      <div class="field" style="margin-top:16px">
+        <div class="input-group">
+          <input id="rename-input" autocomplete="off">
+          <span class="suffix">.md</span>
+        </div>
+        <p class="hint" id="rename-original"></p>
+        <p class="hint" id="rename-error" style="color:var(--err)" hidden></p>
+      </div>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="ghost" id="rename-reset">Khôi phục tên gốc</button>
+      <button type="button" class="secondary" id="rename-cancel">Huỷ</button>
+      <button type="submit" class="primary" id="rename-ok">Lưu tên</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="delete-dialog">
+  <div class="dialog-body">
+    <span class="badge-icon err"><svg><use href="#i-trash"/></svg></span>
+    <h3>Xoá tài liệu khỏi máy?</h3>
+    <p><b id="delete-name"></b> cùng ảnh và tệp đính kèm chỉ tài liệu này dùng sẽ bị <b>xoá vĩnh viễn</b> khỏi thư mục export. Tài liệu trên Confluence không bị ảnh hưởng.</p>
+  </div>
+  <div class="dialog-actions">
+    <button class="secondary" id="delete-cancel">Huỷ</button>
+    <button class="primary danger" id="delete-ok">Xoá tài liệu</button>
   </div>
 </dialog>
 

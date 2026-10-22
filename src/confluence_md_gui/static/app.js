@@ -57,6 +57,7 @@ function goto(step) {
   history.replaceState(null, "", "#" + step);
   window.scrollTo({ top: 0, behavior: "smooth" });
   if (step === "preview") loadTree();
+  if (step === "github") loadDocs();
 }
 function markDone(step) {
   document.querySelector(`.steps button[data-step="${step}"]`).classList.add("done");
@@ -204,6 +205,7 @@ jobHandlers.export = async (job) => {
     return;
   }
   $("export-error").hidden = true;
+  docsLoadedFor = null;
   markDone("export");
   toast("Export hoàn tất.", "ok");
   try {
@@ -269,30 +271,48 @@ function statusBoxHtml(kind, html) {
 }
 
 // ---------------------------------------------------------------- 4. preview
-let files = [];
+let files = [], currentDoc = null;
+const docLabel = (d) => d.name.replace(/\.md$/, "");
+
 async function loadTree() {
   if (!val("output")) return;
   try {
-    files = (await api("/api/tree?output=" + encodeURIComponent(val("output")))).files;
+    files = (await api("/api/docs?output=" + encodeURIComponent(val("output")))).docs;
     renderTree();
+    if (currentDoc) {
+      currentDoc = files.find((d) => d.path === currentDoc.path) || null;
+      currentDoc ? updatePreviewToolbar() : clearPreview();
+    }
   } catch (e) { $("file-list").innerHTML = `<li>${esc(e.message)}</li>`; }
 }
 function renderTree() {
   const f = $("filter").value.toLowerCase();
-  const shown = files.filter((p) => p.toLowerCase().includes(f));
-  $("file-count").textContent = files.length ? `${shown.length} / ${files.length} file` : "";
-  $("file-list").innerHTML = shown.length ? shown.map((p) => {
-    const i = p.lastIndexOf("/");
-    const name = p.slice(i + 1).replace(/\.md$/, ""), dir = i > 0 ? p.slice(0, i) : "";
-    return `<li data-path="${esc(p)}">${icon("file")}<span class="path"><span>${esc(name)}</span>${dir ? `<small>${esc(dir)}</small>` : ""}</span></li>`;
-  }).join("") : `<li class="hint">${files.length ? "Không có file khớp." : "Chưa có file Markdown nào."}</li>`;
+  const shown = files.filter((d) => (d.path + " " + d.name).toLowerCase().includes(f));
+  $("file-count").textContent = files.length ? `${shown.length} / ${files.length} tài liệu` : "";
+  $("file-list").innerHTML = shown.length ? shown.map((d) => {
+    const i = d.path.lastIndexOf("/"), dir = i > 0 ? d.path.slice(0, i) : "";
+    return `<li data-path="${esc(d.path)}" class="${currentDoc?.path === d.path ? "active" : ""}">${icon("file")}<span class="path">
+      <span>${esc(docLabel(d))}${d.renamed ? '<span class="renamed-tag">đổi tên</span>' : ""}</span>${dir ? `<small>${esc(dir)}</small>` : ""}</span></li>`;
+  }).join("") : `<li class="hint">${files.length ? "Không có tài liệu khớp." : "Chưa có tài liệu nào."}</li>`;
+}
+function clearPreview() {
+  currentDoc = null;
+  $("preview-toolbar").hidden = true;
+  $("preview-body").innerHTML = `<div class="empty">${icon("file")}<p>Chọn một tài liệu bên trái để xem nội dung.</p></div>`;
+}
+function updatePreviewToolbar() {
+  $("preview-toolbar").hidden = false;
+  $("pt-title").textContent = docLabel(currentDoc);
+  $("pt-sub").textContent = currentDoc.renamed ? `Tên trên máy: ${currentDoc.path.split("/").pop()}` : currentDoc.path;
 }
 $("filter").addEventListener("input", renderTree);
 $("btn-refresh").addEventListener("click", loadTree);
 $("file-list").addEventListener("click", async (ev) => {
   const li = ev.target.closest("li[data-path]");
   if (!li) return;
+  currentDoc = files.find((d) => d.path === li.dataset.path);
   document.querySelectorAll("#file-list li").forEach((x) => x.classList.toggle("active", x === li));
+  updatePreviewToolbar();
   try {
     const q = new URLSearchParams({ output: val("output"), path: li.dataset.path });
     $("preview-body").innerHTML = (await api("/api/preview?" + q)).html;
@@ -300,6 +320,56 @@ $("file-list").addEventListener("click", async (ev) => {
     markDone("preview");
   } catch (e) { $("preview-body").innerHTML = statusBoxHtml("err", esc(e.message)); }
 });
+$("pt-rename").addEventListener("click", () => currentDoc && renameDoc(currentDoc));
+$("pt-delete").addEventListener("click", () => currentDoc && deleteDoc(currentDoc));
+
+// ---- đổi tên & xoá (dùng chung cho bước 4 và 5)
+async function refreshDocLists() {
+  await Promise.all([loadTree(), loadDocs(true)]);
+}
+
+function renameDoc(doc) {
+  const dlg = $("rename-dialog"), input = $("rename-input"), err = $("rename-error");
+  const original = doc.path.split("/").pop();
+  input.value = docLabel(doc);
+  $("rename-original").textContent = `Tên gốc: ${original}`;
+  $("rename-reset").hidden = !doc.renamed;
+  err.hidden = true;
+  const save = async (name) => {
+    busy($("rename-ok"), true);
+    try {
+      await api("/api/doc/rename", { output: val("output"), path: doc.path, name });
+      dlg.close();
+      toast(name === original ? "Đã khôi phục tên gốc." : `Đã đổi tên thành <b>${esc(name.replace(/\.md$/, ""))}</b>.`, "ok");
+      await refreshDocLists();
+    } catch (e) { err.textContent = e.message; err.hidden = false; }
+    finally { busy($("rename-ok"), false); }
+  };
+  $("rename-form").onsubmit = (ev) => { ev.preventDefault(); save(input.value); };
+  $("rename-reset").onclick = () => save(original);
+  $("rename-cancel").onclick = () => dlg.close();
+  dlg.showModal();
+  input.select();
+}
+
+function deleteDoc(doc) {
+  const dlg = $("delete-dialog");
+  $("delete-name").textContent = docLabel(doc);
+  $("delete-cancel").onclick = () => dlg.close();
+  $("delete-ok").onclick = async () => {
+    busy($("delete-ok"), true);
+    try {
+      const r = await api("/api/doc/delete", { output: val("output"), path: doc.path });
+      dlg.close();
+      docsSelected.delete(doc.path);
+      if (currentDoc?.path === doc.path) clearPreview();
+      toast(`Đã xoá <b>${esc(docLabel(doc))}</b>${r.assets ? ` và ${r.assets} tệp đính kèm` : ""}.`, "ok");
+      await refreshDocLists();
+    } catch (e) { toast(esc(e.message), "err"); }
+    finally { busy($("delete-ok"), false); }
+  };
+  dlg.showModal();
+}
 
 // ---------------------------------------------------------------- 5. github
 let ghStatus = null, repos = [], selectedRepo = null;
@@ -447,6 +517,131 @@ $("btn-create-repo").addEventListener("click", async () => {
   finally { busy(btn, false); }
 });
 
+// ---- chọn tài liệu
+let docs = [], docsSelected = new Set(), docsLoadedFor = null;
+const collapsed = new Set();
+
+async function loadDocs(force = false) {
+  const out = val("output");
+  if (!out) { $("docs-tree").innerHTML = `<div class="empty-row">Chưa có thư mục kết quả — hãy export ở bước 2.</div>`; return; }
+  if (!force && docsLoadedFor === out) return;
+  $("docs-tree").innerHTML = `<div class="empty-row"><span class="spinner"></span></div>`;
+  try {
+    docs = (await api("/api/docs?output=" + encodeURIComponent(out))).docs;
+    const known = new Set(docs.map((d) => d.path));
+    // Lần đầu (hoặc đổi thư mục) chọn tất cả; giữ lựa chọn cũ nếu chỉ tải lại.
+    docsSelected = docsLoadedFor === out ? new Set([...docsSelected].filter((p) => known.has(p))) : new Set(known);
+    docsLoadedFor = out;
+    renderDocs();
+  } catch (e) { $("docs-tree").innerHTML = `<div class="empty-row">${esc(e.message)}</div>`; }
+}
+
+function buildTree(items) {
+  const root = { name: "", path: "", children: new Map(), docs: [] };
+  for (const d of items) {
+    const parts = d.path.split("/");
+    let node = root;
+    parts.slice(0, -1).forEach((part, i) => {
+      const path = parts.slice(0, i + 1).join("/");
+      if (!node.children.has(part)) node.children.set(part, { name: part, path, children: new Map(), docs: [] });
+      node = node.children.get(part);
+    });
+    node.docs.push(d);
+  }
+  // Gộp các thư mục chỉ có 1 thư mục con (vd. "Space/Space") cho gọn.
+  const squash = (n) => {
+    n.children.forEach((c) => squash(c));
+    if (n.path && n.docs.length === 0 && n.children.size === 1) {
+      const only = [...n.children.values()][0];
+      n.name = n.name + " / " + only.name; n.path = only.path; n.children = only.children; n.docs = only.docs;
+    }
+  };
+  root.children.forEach(squash);
+  return root;
+}
+const docsIn = (n) => [...n.docs.map((d) => d.path), ...[...n.children.values()].flatMap(docsIn)];
+
+function renderDocs() {
+  const q = $("docs-search").value.toLowerCase();
+  const shown = docs.filter((d) => (d.path + " " + d.name).toLowerCase().includes(q));
+  const sel = docs.filter((d) => docsSelected.has(d.path));
+  $("docs-summary").textContent = docs.length
+    ? `${sel.length}/${docs.length} tài liệu · ${formatBytes(sel.reduce((s, d) => s + d.bytes, 0))}` : "";
+  if (!shown.length) {
+    $("docs-tree").innerHTML = `<div class="empty-row">${docs.length ? "Không có tài liệu khớp." : "Chưa có tài liệu nào — hãy export ở bước 2."}</div>`;
+    return;
+  }
+  const renderNode = (n) => {
+    const folders = [...n.children.values()].sort((a, b) => a.name.localeCompare(b.name, "vi")).map((c) => {
+      const all = docsIn(c), on = all.filter((p) => docsSelected.has(p)).length;
+      const isCollapsed = collapsed.has(c.path) && !q;
+      return `<li class="folder${isCollapsed ? " collapsed" : ""}">
+        <div class="row" data-folder="${esc(c.path)}">
+          <span class="twisty" data-toggle="${esc(c.path)}">${icon("chevron")}</span>
+          <input type="checkbox" data-check-folder="${esc(c.path)}" ${on === all.length ? "checked" : ""} ${on && on < all.length ? 'data-indeterminate="1"' : ""}>
+          ${icon("folder")}<span class="label" title="${esc(c.path)}">${esc(c.name)}</span><span class="meta">${on}/${all.length}</span>
+        </div>
+        <ul>${renderNode(c)}</ul></li>`;
+    }).join("");
+    const files = n.docs.sort((a, b) => a.path.localeCompare(b.path, "vi")).map((d) => `<li>
+        <label class="row"><span class="spacer"></span>
+          <input type="checkbox" data-check-doc="${esc(d.path)}" ${docsSelected.has(d.path) ? "checked" : ""}>
+          ${icon("file")}<span class="label" title="${esc(d.path)}">${esc(docLabel(d))}${d.renamed ? '<span class="renamed-tag">đổi tên</span>' : ""}</span>
+          <span class="row-actions"><button type="button" data-rename="${esc(d.path)}" title="Đổi tên">${icon("edit")}</button><button type="button" class="del" data-delete="${esc(d.path)}" title="Xoá khỏi máy">${icon("trash")}</button></span>
+          <span class="meta">${d.assets ? d.assets + " tệp · " : ""}${formatBytes(d.bytes)}</span>
+        </label></li>`).join("");
+    return folders + files;
+  };
+  const tree = buildTree(shown);
+  tree._shown = shown;
+  $("docs-tree").innerHTML = `<ul>${renderNode(tree)}</ul>`;
+  $("docs-tree").querySelectorAll("[data-indeterminate]").forEach((el) => (el.indeterminate = true));
+  $("docs-tree")._tree = tree;
+}
+
+$("docs-tree").addEventListener("click", (ev) => {
+  const action = ev.target.closest("[data-rename],[data-delete]");
+  if (action) {
+    ev.preventDefault();
+    const doc = docs.find((d) => d.path === (action.dataset.rename || action.dataset.delete));
+    if (doc) action.dataset.rename ? renameDoc(doc) : deleteDoc(doc);
+    return;
+  }
+  const toggle = ev.target.closest("[data-toggle]");
+  if (toggle) {
+    const p = toggle.dataset.toggle;
+    collapsed.has(p) ? collapsed.delete(p) : collapsed.add(p);
+    renderDocs();
+    return;
+  }
+  const row = ev.target.closest(".row[data-folder]");
+  if (row && !ev.target.matches("input")) row.querySelector("input").click();
+});
+$("docs-tree").addEventListener("change", (ev) => {
+  const el = ev.target;
+  if (el.dataset.checkDoc) {
+    el.checked ? docsSelected.add(el.dataset.checkDoc) : docsSelected.delete(el.dataset.checkDoc);
+  } else if (el.dataset.checkFolder) {
+    const prefix = el.dataset.checkFolder + "/";
+    const q = $("docs-search").value.toLowerCase();
+    docs.filter((d) => d.path.startsWith(prefix) && d.path.toLowerCase().includes(q))
+      .forEach((d) => (el.checked ? docsSelected.add(d.path) : docsSelected.delete(d.path)));
+  }
+  renderDocs();
+});
+$("docs-search").addEventListener("input", renderDocs);
+$("docs-reload").addEventListener("click", () => loadDocs(true));
+$("docs-all").addEventListener("click", () => {
+  const q = $("docs-search").value.toLowerCase();
+  docs.filter((d) => d.path.toLowerCase().includes(q)).forEach((d) => docsSelected.add(d.path));
+  renderDocs();
+});
+$("docs-none").addEventListener("click", () => {
+  const q = $("docs-search").value.toLowerCase();
+  docs.filter((d) => d.path.toLowerCase().includes(q)).forEach((d) => docsSelected.delete(d.path));
+  renderDocs();
+});
+
 function confirmPublic() {
   return new Promise((resolve) => {
     const dlg = $("confirm-public");
@@ -462,6 +657,7 @@ $("btn-push").addEventListener("click", async () => {
   if (!ghStatus?.logged_in) { toast("Hãy đăng nhập GitHub trước.", "err"); return; }
   if (!selectedRepo) { toast("Hãy chọn một repository.", "err"); $("repo-search").focus(); return; }
   if (!val("output")) { toast("Chưa có thư mục kết quả. Hãy export ở bước 2.", "err"); goto("export"); return; }
+  if (!docsSelected.size) { toast("Hãy chọn ít nhất một tài liệu để push.", "err"); return; }
   if (!selectedRepo.private && !(await confirmPublic())) return;
   const btn = $("btn-push");
   busy(btn, true);
@@ -471,6 +667,7 @@ $("btn-push").addEventListener("click", async () => {
     await api("/api/push", {
       repo: selectedRepo.full_name, branch: val("branch"), subdir: val("subdir"),
       message: val("message"), output: val("output"), allow_public: !selectedRepo.private,
+      docs: [...docsSelected],
     });
     startPolling("push");
   } catch (e) {
@@ -509,6 +706,7 @@ jobHandlers.push = (job) => {
     for (const k of ["base_url", "email", "output", "repo", "branch", "subdir"]) if (s[k]) $(k).value = s[k];
     $("version").textContent = "v" + s.version;
     refreshGitHub().catch(() => {});
+    if (location.hash === "#github") loadDocs(true);
     const job = await api("/api/job");
     if (job.running) {
       busy($(job.kind === "push" ? "btn-push" : "btn-export"), true);
