@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Confluence → Markdown</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Confluence → Markdown</h1>
+  <p>Export trang Confluence ra .md (kèm ảnh) và đẩy lên GitHub.</p>
+</header>
+
+<nav class="tabs">
+  <button data-tab="export" class="active">1. Export</button>
+  <button data-tab="links">2. Kiểm tra ảnh</button>
+  <button data-tab="preview">3. Xem trước</button>
+  <button data-tab="github">4. GitHub</button>
+</nav>
+
+<main>
+  <section id="tab-export" class="panel active">
+    <div class="grid">
+      <label>Địa chỉ Confluence
+        <input id="base_url" placeholder="https://congty.atlassian.net">
+      </label>
+      <label>Email đăng nhập
+        <input id="email" type="email" placeholder="ban@congty.com">
+      </label>
+      <label class="full">API token
+        <input id="token" type="password" placeholder="Không được lưu lại – nhập mỗi lần mở app">
+        <small>Tạo tại <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank">id.atlassian.com → Security → API tokens</a></small>
+      </label>
+      <label>Kiểu export
+        <select id="mode">
+          <option value="pages">Một trang</option>
+          <option value="pages-with-descendants" selected>Trang + các trang con</option>
+          <option value="folders">Cả folder</option>
+          <option value="spaces">Cả space</option>
+        </select>
+      </label>
+      <label>Link trang / folder / space
+        <input id="target_url" placeholder="https://congty.atlassian.net/wiki/spaces/ABC/pages/123456/Ten+trang">
+      </label>
+      <label class="full">Thư mục lưu kết quả
+        <input id="output" placeholder="C:\cme-export">
+        <small>Nên đặt đường dẫn ngắn (Windows giới hạn ~260 ký tự cho đường dẫn).</small>
+      </label>
+    </div>
+    <div class="actions">
+      <button id="btn-export" class="primary">Bắt đầu export</button>
+      <button class="btn-cancel">Dừng</button>
+    </div>
+  </section>
+
+  <section id="tab-links" class="panel">
+    <p>Quét các file .md trong thư mục kết quả để tìm ảnh sẽ <b>không hiển thị</b> trên GitHub.</p>
+    <label class="check"><input type="checkbox" id="strip_query"> Tự xoá phần <code>?width=…</code> ở cuối link ảnh</label>
+    <div class="actions"><button id="btn-links" class="primary">Kiểm tra</button></div>
+    <div id="links-report"></div>
+  </section>
+
+  <section id="tab-preview" class="panel">
+    <div class="preview">
+      <aside>
+        <button id="btn-refresh">↻ Tải lại danh sách</button>
+        <input id="filter" placeholder="Lọc theo tên…">
+        <ul id="file-list"></ul>
+      </aside>
+      <article id="preview-body" class="markdown"><p class="muted">Chọn một file bên trái để xem.</p></article>
+    </div>
+  </section>
+
+  <section id="tab-github" class="panel">
+    <div class="grid">
+      <label>Repo GitHub
+        <input id="repo" placeholder="owner/ten-repo hoặc https://github.com/owner/ten-repo">
+      </label>
+      <label>Nhánh
+        <input id="branch" placeholder="main">
+      </label>
+      <label class="full">GitHub token
+        <input id="gh_token" type="password" placeholder="Fine-grained token, quyền Contents: Read and write">
+        <small>Tạo tại <a href="https://github.com/settings/personal-access-tokens/new" target="_blank">GitHub → Settings → Developer settings → Fine-grained tokens</a>. Không được lưu lại.</small>
+      </label>
+      <label>Thư mục con trong repo (tuỳ chọn)
+        <input id="subdir" placeholder="docs">
+      </label>
+      <label>Nội dung commit
+        <input id="message" placeholder="Cập nhật tài liệu từ Confluence">
+      </label>
+    </div>
+    <div id="repo-info"></div>
+    <label class="check"><input type="checkbox" id="allow_public"> Tôi xác nhận muốn đẩy lên repo <b>public</b> (ai cũng xem được)</label>
+    <div class="actions">
+      <button id="btn-gh-check">Kiểm tra repo</button>
+      <button id="btn-push" class="primary">Push lên GitHub</button>
+      <button class="btn-cancel">Dừng</button>
+    </div>
+    <p class="muted">Chỉ file mới hoặc đã thay đổi được tải lên. File đã xoá ở máy sẽ không bị xoá trên GitHub.</p>
+  </section>
+
+  <section class="log-wrap">
+    <div class="log-head"><span>Nhật ký</span><span id="status"></span></div>
+    <pre id="log"></pre>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
