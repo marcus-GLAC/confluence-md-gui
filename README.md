@@ -35,9 +35,9 @@ Tắt công cụ bằng `Ctrl + C` trong terminal.
 Bạn cần chuẩn bị:
 
 - **Confluence API token**: [tạo tại đây](https://id.atlassian.com/manage-profile/security/api-tokens)
-- **GitHub token** (chỉ khi đưa lên GitHub): [tạo tại đây](https://github.com/settings/personal-access-tokens/new), chọn repo đích và cấp quyền **Contents: Read and write**
+- **Tài khoản GitHub**: bấm **Đăng nhập bằng GitHub** và nhập mã hiện trên màn hình (hoặc dán [Personal Access Token](https://github.com/settings/personal-access-tokens/new) có quyền **Contents: Read and write**)
 
-Token chỉ dùng trong lúc chạy, không được lưu lại.
+Token chỉ được lưu khi bạn chọn **Ghi nhớ đăng nhập** (lưu trong kho mật khẩu của hệ điều hành).
 
 ## Cập nhật / gỡ cài đặt
 

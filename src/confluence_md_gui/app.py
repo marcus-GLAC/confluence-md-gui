@@ -36,9 +36,13 @@ DATA_DIR = Path(os.environ.get("APPDATA") or Path.home() / ".config") / APP_NAME
 SETTINGS_FILE = DATA_DIR / "settings.json"
 CME_CONFIG_FILE = DATA_DIR / "cme_config.json"
 DEFAULT_OUTPUT = r"C:\cme-export" if os.name == "nt" else str(Path.home() / "cme-export")
-GITHUB_MAX_FILE = 100 * 1024 * 1024
+# API tạo blob của GitHub từ chối file lớn (thực tế khoảng 40MB sau khi mã hoá base64).
+GITHUB_MAX_FILE = 40 * 1024 * 1024
 EXPORT_MODES = {"pages", "pages-with-descendants", "folders", "spaces"}
 SESSION = secrets.token_urlsafe(24)
+# Client ID của GitHub OAuth App (bật Device Flow). Không phải bí mật, được phép công khai.
+GITHUB_CLIENT_ID = os.environ.get("CME_GUI_GITHUB_CLIENT_ID", "Ov23liFG0NmCelT4uXMu")
+KEYRING_USER = "github-token"
 
 
 # ---------------------------------------------------------------- settings
@@ -312,12 +316,220 @@ def github_check(repo: str, token: str) -> dict:
     return {"private": data["private"], "default_branch": data["default_branch"], "full_name": data["full_name"]}
 
 
+def form_post(url: str, fields: dict) -> dict:
+    req = urllib.request.Request(
+        url, data=urllib.parse.urlencode(fields).encode(),
+        headers={"Accept": "application/json", "User-Agent": APP_NAME},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
+def keyring_backend():
+    """Trả về module keyring nếu máy có kho mật khẩu dùng được (Windows Credential Manager, macOS Keychain…)."""
+    try:
+        import keyring
+        from keyring.backends import fail
+
+        backend = keyring.get_keyring()
+        if isinstance(backend, fail.Keyring) or getattr(backend, "priority", 0) <= 0:
+            return None
+        return keyring
+    except Exception:  # noqa: BLE001 - thiếu backend thì coi như không hỗ trợ
+        return None
+
+
+class GitHubSession:
+    """Giữ token GitHub trong bộ nhớ của tiến trình; trình duyệt không bao giờ thấy token."""
+
+    lock = threading.Lock()
+    token = ""
+    user: dict = {}
+    remembered = False
+    device: dict = {}
+
+    @classmethod
+    def status(cls) -> dict:
+        return {
+            "logged_in": bool(cls.token), "login": cls.user.get("login", ""), "avatar": cls.user.get("avatar_url", ""),
+            "name": cls.user.get("name") or "", "remembered": cls.remembered,
+            "can_remember": keyring_backend() is not None, "device_enabled": bool(GITHUB_CLIENT_ID),
+        }
+
+    @classmethod
+    def login(cls, token: str, remember: bool) -> dict:
+        token = token.strip()
+        status, user = gh_api("GET", "/user", token)
+        if status != 200:
+            raise ValueError("Token GitHub không hợp lệ hoặc đã hết hạn.")
+        with cls.lock:
+            cls.token, cls.user, cls.remembered = token, user, False
+        kr = keyring_backend()
+        if remember and kr:
+            kr.set_password(APP_NAME, KEYRING_USER, token)
+            cls.remembered = True
+        return cls.status()
+
+    @classmethod
+    def logout(cls) -> None:
+        with cls.lock:
+            cls.token, cls.user, cls.remembered, cls.device = "", {}, False, {}
+        kr = keyring_backend()
+        if kr:
+            try:
+                kr.delete_password(APP_NAME, KEYRING_USER)
+            except Exception:  # noqa: BLE001 - chưa lưu thì bỏ qua
+                pass
+
+    @classmethod
+    def restore(cls) -> None:
+        kr = keyring_backend()
+        if not kr:
+            return
+        try:
+            token = kr.get_password(APP_NAME, KEYRING_USER)
+            if token:
+                cls.login(token, remember=True)
+        except Exception:  # noqa: BLE001 - token cũ không dùng được thì bắt đăng nhập lại
+            pass
+
+    @classmethod
+    def require(cls) -> str:
+        if not cls.token:
+            raise ValueError("Bạn chưa đăng nhập GitHub.")
+        return cls.token
+
+    # -- Device Flow: https://docs.github.com/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow
+    @classmethod
+    def device_start(cls, remember: bool) -> dict:
+        if not GITHUB_CLIENT_ID:
+            raise ValueError("Chưa cấu hình GitHub OAuth App cho tính năng đăng nhập.")
+        try:
+            data = form_post("https://github.com/login/device/code", {"client_id": GITHUB_CLIENT_ID, "scope": "repo"})
+        except urllib.error.HTTPError as err:
+            raise ValueError(f"GitHub từ chối yêu cầu đăng nhập ({err.code}). Kiểm tra Client ID của OAuth App.") from err
+        if "device_code" not in data:
+            raise ValueError(data.get("error_description") or "GitHub không cấp được mã đăng nhập.")
+        state = {"state": "pending", "message": "", "id": secrets.token_hex(4)}
+        cls.device = state
+        threading.Thread(target=cls._device_poll, args=(data, remember, state), daemon=True).start()
+        return {"user_code": data["user_code"], "verification_uri": data["verification_uri"],
+                "expires_in": data["expires_in"]}
+
+    @classmethod
+    def _device_poll(cls, data: dict, remember: bool, state: dict) -> None:
+        import time
+
+        interval = int(data.get("interval", 5))
+        deadline = time.time() + int(data.get("expires_in", 900))
+        while time.time() < deadline and cls.device is state:
+            time.sleep(interval)
+            try:
+                r = form_post("https://github.com/login/oauth/access_token", {
+                    "client_id": GITHUB_CLIENT_ID, "device_code": data["device_code"],
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                })
+            except (urllib.error.URLError, ValueError):
+                continue
+            if "access_token" in r:
+                try:
+                    cls.login(r["access_token"], remember)
+                    state["state"] = "ok"
+                except ValueError as exc:
+                    state.update(state="error", message=str(exc))
+                return
+            err = r.get("error")
+            if err == "slow_down":
+                interval = int(r.get("interval", interval + 5))
+            elif err != "authorization_pending":
+                messages = {"access_denied": "Bạn đã từ chối cấp quyền.", "expired_token": "Mã đã hết hạn, hãy thử lại."}
+                state.update(state="error", message=messages.get(err, r.get("error_description") or err))
+                return
+        if cls.device is state and state["state"] == "pending":
+            state.update(state="error", message="Mã đã hết hạn, hãy thử lại.")
+
+
+def list_repos(token: str) -> list[dict]:
+    repos = []
+    for page in range(1, 11):
+        status, data = gh_api("GET", f"/user/repos?per_page=100&sort=updated&page={page}", token)
+        if status != 200:
+            raise ValueError(f"Không lấy được danh sách repo: {data.get('message')}")
+        repos += [
+            {"full_name": r["full_name"], "private": r["private"], "default_branch": r["default_branch"],
+             "updated_at": r["updated_at"], "description": r.get("description") or ""}
+            for r in data if r.get("permissions", {}).get("push") and not r.get("archived")
+        ]
+        if len(data) < 100:
+            break
+    return repos
+
+
+def create_repo(token: str, name: str, private: bool) -> dict:
+    name = name.strip()
+    if not re.fullmatch(r"[\w.-]{1,100}", name):
+        raise ValueError("Tên repo chỉ gồm chữ, số, dấu gạch ngang, gạch dưới hoặc dấu chấm.")
+    status, data = gh_api("POST", "/user/repos", token, {
+        "name": name, "private": private, "auto_init": True,
+        "description": "Tài liệu export từ Confluence",
+    })
+    if status != 201:
+        errors = "; ".join(e.get("message", "") for e in data.get("errors", []) if isinstance(e, dict))
+        raise ValueError(f"Không tạo được repo: {errors or data.get('message')}")
+    return {"full_name": data["full_name"], "private": data["private"], "default_branch": data["default_branch"],
+            "updated_at": data["updated_at"], "description": data.get("description") or ""}
+
+
+MD_LINK = re.compile(r"!?\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+
+
+def confluence_page_urls(output: Path) -> dict[str, str]:
+    """Đọc confluence-lock.json (cme tạo khi export) → {đường dẫn .md: link trang Confluence gốc}."""
+    try:
+        lock = json.loads((output / "confluence-lock.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    urls = {}
+    for base, org in (lock.get("orgs") or {}).items():
+        for space, sp in (org.get("spaces") or {}).items():
+            for page_id, page in (sp.get("pages") or {}).items():
+                if page.get("export_path"):
+                    urls[page["export_path"]] = f"{base.rstrip('/')}/wiki/spaces/{space}/pages/{page_id}"
+    return urls
+
+
+def format_size(n: int) -> str:
+    return f"{n / 1024 / 1024:.1f} MB" if n >= 1024 * 1024 else f"{n / 1024:.0f} KB"
+
+
+def replace_skipped_links(text: str, md_rel: str, skipped: dict[str, int], page_url: str | None) -> tuple[str, int]:
+    """Thay link tới file bị bỏ qua bằng một dòng ghi chú dẫn về trang Confluence gốc."""
+    md_dir = os.path.dirname(md_rel)
+    count = 0
+
+    def sub(match: re.Match) -> str:
+        nonlocal count
+        target = urllib.parse.unquote(match.group(2).split("?", 1)[0].split("#", 1)[0])
+        if urllib.parse.urlparse(target).scheme:
+            return match.group(0)
+        resolved = os.path.normpath(os.path.join(md_dir, target)).replace("\\", "/")
+        if resolved not in skipped:
+            return match.group(0)
+        count += 1
+        name = match.group(1).strip() or os.path.basename(resolved)
+        where = f"[trang gốc trên Confluence]({page_url})" if page_url else "trang gốc trên Confluence"
+        return (f"📎 *Tệp đính kèm **{name}** ({format_size(skipped[resolved])}) quá lớn nên không được đưa lên "
+                f"GitHub — xem tệp này tại {where}.*")
+
+    return MD_LINK.sub(sub, text), count
+
+
 def git_blob_sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
 def run_push(job: Job, p: dict) -> bool:
-    token, repo = p["gh_token"].strip(), parse_repo(p["repo"])
+    token, repo = GitHubSession.require(), parse_repo(p["repo"])
     branch = p.get("branch", "").strip() or "main"
     subdir = p.get("subdir", "").strip().strip("/")
     output = Path(p["output"]).expanduser()
@@ -355,8 +567,12 @@ def run_push(job: Job, p: dict) -> bool:
         e["path"]: e["sha"] for e in remote_tree["tree"] if e["type"] == "blob"
     }
 
-    entries, skipped_big = [], []
     files = sorted(f for f in output.rglob("*") if f.is_file() and ".git" not in f.relative_to(output).parts)
+    # File .md xử lý sau cùng để biết hết file nào bị bỏ qua mà sửa link trong đó.
+    files.sort(key=lambda f: f.suffix.lower() == ".md")
+    skipped: dict[str, int] = {}
+    page_urls = confluence_page_urls(output)
+    entries, notes = [], 0
     job.log(f"  Đang so sánh {len(files)} file…")
     for i, f in enumerate(files, 1):
         if job.cancelled:
@@ -364,21 +580,35 @@ def run_push(job: Job, p: dict) -> bool:
             return False
         rel = f.relative_to(output).as_posix()
         path = f"{subdir}/{rel}" if subdir else rel
-        if f.stat().st_size > GITHUB_MAX_FILE:
-            skipped_big.append(rel)
+        size = f.stat().st_size
+        if size > GITHUB_MAX_FILE:
+            skipped[rel] = size
             continue
         data = f.read_bytes()
+        if f.suffix.lower() == ".md" and skipped:
+            text, n = replace_skipped_links(data.decode("utf-8", errors="replace"), rel, skipped, page_urls.get(rel))
+            if n:
+                data, notes = text.encode("utf-8"), notes + n
         if remote.get(path) == git_blob_sha(data):
             continue
-        sha = api("POST", "/git/blobs", {"content": base64.b64encode(data).decode(), "encoding": "base64"})["sha"]
-        entries.append({"path": path, "mode": "100644", "type": "blob", "sha": sha})
+        status, blob = gh_api("POST", f"/repos/{repo}/git/blobs", token,
+                              {"content": base64.b64encode(data).decode(), "encoding": "base64"})
+        if status == 422 and "too large" in str(blob.get("message", "")):
+            skipped[rel] = size
+            continue
+        if status != 201:
+            raise ValueError(f"GitHub API POST /git/blobs lỗi {status}: {blob.get('message')}")
+        entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
         if len(entries) % 20 == 0:
             job.log(f"  Đã tải lên {len(entries)} file thay đổi ({i}/{len(files)})")
 
+    skipped_big = list(skipped)
     for rel in skipped_big:
-        job.log(f"  ⚠ Bỏ qua {rel}: lớn hơn 100MB (giới hạn của GitHub)")
+        job.log(f"  ⚠ Bỏ qua {rel} ({format_size(skipped[rel])}): quá lớn để tải lên GitHub (giới hạn ~40MB)")
+    if notes:
+        job.log(f"  📎 Đã thay {notes} link tới file bị bỏ qua bằng ghi chú dẫn về trang Confluence gốc")
     if not entries:
-        job.result = {"url": f"https://github.com/{repo}/tree/{branch}/{subdir}".rstrip("/"), "files": 0}
+        job.result = {"url": f"https://github.com/{repo}/tree/{branch}/{subdir}".rstrip("/"), "files": 0, "skipped": skipped_big}
         job.log("✅ Không có thay đổi nào so với GitHub.")
         return True
 
@@ -392,7 +622,7 @@ def run_push(job: Job, p: dict) -> bool:
     else:
         api("POST", "/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit})
     url = f"https://github.com/{repo}/tree/{branch}/{subdir}".rstrip("/")
-    job.result = {"url": url, "files": len(entries)}
+    job.result = {"url": url, "files": len(entries), "skipped": skipped_big}
     job.log(f"✅ Đã push {len(entries)} file. Xem tại: {url}")
     return True
 
@@ -455,6 +685,12 @@ class Handler(BaseHTTPRequestHandler):
                 from confluence_md_gui import __version__
 
                 return self._json({**load_settings(), "version": __version__})
+            if url.path == "/api/gh/status":
+                return self._json(GitHubSession.status())
+            if url.path == "/api/gh/device":
+                return self._json({k: v for k, v in GitHubSession.device.items() if k != "id"} or {"state": "idle"})
+            if url.path == "/api/gh/repos":
+                return self._json({"repos": list_repos(GitHubSession.require())})
             if url.path == "/api/stats":
                 return self._json(export_stats(Path(q["output"]).expanduser()))
             if url.path == "/api/job":
@@ -493,7 +729,8 @@ class Handler(BaseHTTPRequestHandler):
                 Job.start("export", run_export, p)
                 return self._json({"started": True})
             if path == "/api/push":
-                for key in ("gh_token", "repo", "output"):
+                GitHubSession.require()
+                for key in ("repo", "output"):
                     if not str(p.get(key, "")).strip():
                         raise ValueError(f"Thiếu thông tin: {key}")
                 save_settings(p)
@@ -512,7 +749,16 @@ class Handler(BaseHTTPRequestHandler):
                 save_settings(p)
                 return self._json(confluence_check(p["base_url"], p["email"], p["token"]))
             if path == "/api/github-check":
-                return self._json(github_check(p["repo"], p["gh_token"]))
+                return self._json(github_check(p["repo"], GitHubSession.require()))
+            if path == "/api/gh/token":
+                return self._json(GitHubSession.login(p["token"], bool(p.get("remember"))))
+            if path == "/api/gh/device":
+                return self._json(GitHubSession.device_start(bool(p.get("remember"))))
+            if path == "/api/gh/logout":
+                GitHubSession.logout()
+                return self._json(GitHubSession.status())
+            if path == "/api/gh/create-repo":
+                return self._json(create_repo(GitHubSession.require(), p["name"], bool(p.get("private", True))))
         except (ValueError, OSError, KeyError) as exc:
             return self._error(str(exc))
         self._error("Không tìm thấy", 404)
@@ -526,6 +772,7 @@ def free_port() -> int:
 
 def serve(port: int, open_browser: bool) -> None:
     port = port or free_port()
+    GitHubSession.restore()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
     print(f"Confluence → Markdown đang chạy tại {url}")

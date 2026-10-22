@@ -248,3 +248,56 @@ dialog::backdrop { background: rgba(13, 45, 79, .35); }
 .hint svg { width: 14px; height: 14px; vertical-align: -2px; color: var(--ok); }
 button:focus-visible, .button:focus-visible { outline: 2px solid var(--curious); outline-offset: 2px; }
 dialog button:focus:not(:focus-visible) { outline: none; }
+
+/* step 5 – GitHub */
+.card-title { display: flex; align-items: center; gap: 10px; font: 600 15px var(--head); margin-bottom: 16px; }
+.num-badge { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--soft); color: var(--yale); font-size: 12.5px; }
+.push-right { margin-left: auto; }
+.github-btn { background: #24292f; color: #fff; padding: 12px 20px; font-weight: 500; }
+.github-btn:hover { background: #32383f; }
+.gh-mark { width: 18px; height: 18px; }
+.gh-mark.big { width: 40px; height: 40px; color: var(--whale); }
+#gh-device-box .hint { margin-top: 8px; }
+.alt-login { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
+.alt-login summary { cursor: pointer; color: var(--yale); font-size: 14px; font-weight: 500; }
+.alt-login[open] summary { margin-bottom: 12px; }
+.alt-login .field { margin-bottom: 12px; }
+.check-line { display: flex; align-items: center; gap: 8px; margin-top: 14px; font: 400 14px var(--body); color: var(--muted); cursor: pointer; }
+.check-line input { width: 16px; height: 16px; accent-color: var(--curious); }
+.account { display: flex; align-items: center; gap: 14px; }
+.account img { border-radius: 50%; border: 2px solid var(--ice); }
+.account-info { display: flex; flex-direction: column; }
+.account-info b { font-size: 15px; }
+.account-info small { color: var(--muted); font-size: 13px; }
+.account .ghost { margin-left: auto; }
+#gh-repo-card.disabled { opacity: .5; pointer-events: none; }
+
+.repo-list { list-style: none; margin: 10px 0 0; padding: 4px; border: 1px solid var(--line); border-radius: 10px; max-height: 280px; overflow: auto; }
+.repo-list li { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+.repo-list li:hover { background: var(--soft); }
+.repo-list li.selected { background: var(--soft); box-shadow: inset 0 0 0 1px var(--curious); }
+.repo-list li .r-name { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repo-list li .r-name small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.repo-list li .tag { margin-left: auto; flex: none; }
+.repo-list li > svg { color: var(--curious); }
+.repo-list li.selected > svg { color: var(--ok); }
+.repo-list .hint { cursor: default; justify-content: center; padding: 18px; }
+.new-repo { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px; margin-bottom: 12px; border-radius: 10px; background: var(--soft); }
+.new-repo .input-group { flex: 1; min-width: 220px; }
+.input-icon.prefix { font-size: 13.5px; color: var(--muted); pointer-events: none; }
+.new-repo .input-group input { padding-left: calc(var(--prefix-w, 0px) + 18px); }
+
+.advanced { margin-top: 18px; }
+.advanced summary { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--yale); font-size: 14px; font-weight: 500; list-style: none; }
+.advanced summary::-webkit-details-marker { display: none; }
+.advanced summary .chev { transform: rotate(-90deg); transition: transform .15s; width: 16px; height: 16px; }
+.advanced[open] summary .chev { transform: none; }
+.advanced[open] summary { margin-bottom: 14px; }
+
+.dialog-body.center { text-align: center; display: flex; flex-direction: column; align-items: center; }
+.dialog-body.center h3 { margin-top: 10px; }
+.device-code { margin: 16px 0 6px; padding: 12px 22px; border-radius: 12px; background: var(--soft); border: 1px dashed var(--baby);
+  font: 700 30px var(--mono); letter-spacing: .12em; color: var(--yale); user-select: all; }
+.waiting { display: flex; align-items: center; gap: 8px; margin-top: 14px !important; font-size: 13.5px; }
+.spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--ice); border-top-color: var(--curious); animation: spin .7s linear infinite; }
+#gh-device-box[hidden] + .alt-login { margin-top: 0; border-top: none; padding-top: 0; }

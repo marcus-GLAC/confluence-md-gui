@@ -257,7 +257,7 @@ $("btn-links").addEventListener("click", async () => {
         ${group("err", "Ảnh trỏ về Confluence hoặc web ngoài", "GitHub không đăng nhập được Confluence nên các ảnh này sẽ không hiện. Hãy tải ảnh lên Confluence dưới dạng tệp đính kèm của trang rồi export lại.", r.remote, item)}
         ${group("err", "Không tìm thấy file ảnh", "Link trỏ tới file không có trong thư mục kết quả. Thử export lại trang chứa ảnh.", r.missing, item)}
         ${group("warn", queryLeft ? "Link ảnh có tham số ?query" : "Link ảnh có tham số ?query (đã tự sửa)", "Phần ?width=… ở cuối link có thể làm GitHub không tìm thấy ảnh.", r.query, item)}
-        ${group("err", "File lớn hơn 100MB", "GitHub từ chối các file này, chúng sẽ được bỏ qua khi push.", r.too_big, (f) => esc(f))}
+        ${group("warn", "File lớn hơn 40MB", "Quá lớn để tải lên GitHub. Khi push, file sẽ được bỏ qua và link trong tài liệu được thay bằng ghi chú dẫn về trang Confluence gốc.", r.too_big, (f) => esc(f))}
       </div>`;
     if (r.files) markDone("links");
   } catch (e) {
@@ -302,22 +302,148 @@ $("file-list").addEventListener("click", async (ev) => {
 });
 
 // ---------------------------------------------------------------- 5. github
-let repoPublic = null;
-async function checkRepo() {
-  const r = await api("/api/github-check", { repo: val("repo"), gh_token: val("gh_token") });
-  repoPublic = !r.private;
-  const tag = r.private ? `<span class="tag private">${icon("lock")}Private</span>` : `<span class="tag public">${icon("alert")}Public</span>`;
-  statusBox("repo-status", r.private ? "ok" : "warn",
-    `Đã truy cập <b>${esc(r.full_name)}</b> ${tag} · nhánh mặc định <code>${esc(r.default_branch)}</code>` +
-    (r.private ? "" : "<br>Tài liệu sẽ công khai với mọi người sau khi push."));
-  if (!val("branch")) $("branch").value = r.default_branch;
-  return r;
+let ghStatus = null, repos = [], selectedRepo = null;
+
+function renderAccount() {
+  const s = ghStatus;
+  $("gh-logged-out").hidden = s.logged_in;
+  $("gh-logged-in").hidden = !s.logged_in;
+  $("gh-repo-card").classList.toggle("disabled", !s.logged_in);
+  $("gh-device-box").hidden = !s.device_enabled;
+  $("gh-token-box").open = !s.device_enabled;
+  $("remember-line").hidden = !s.can_remember;
+  if (s.logged_in) {
+    $("gh-avatar").src = s.avatar;
+    $("gh-login").textContent = s.name ? `${s.name} (@${s.login})` : "@" + s.login;
+    $("gh-remembered").textContent = s.remembered ? "Đã ghi nhớ đăng nhập trên máy này" : "Đăng nhập trong phiên làm việc này";
+    $("new-repo-owner").textContent = s.login + " /";
+  }
 }
-$("btn-gh-check").addEventListener("click", async () => {
-  if (!requireFields(["repo", "gh_token"])) return;
-  const btn = $("btn-gh-check");
+
+async function refreshGitHub(loadList = true) {
+  ghStatus = await api("/api/gh/status");
+  renderAccount();
+  if (ghStatus.logged_in && loadList) await loadRepos();
+  if (!ghStatus.logged_in) { repos = []; renderRepos(); }
+}
+
+async function onLoggedIn() {
+  toast(`Đã đăng nhập GitHub.`, "ok");
+  await refreshGitHub();
+}
+
+$("btn-gh-token").addEventListener("click", async () => {
+  if (!requireFields(["gh_token"])) return;
+  const btn = $("btn-gh-token");
   busy(btn, true);
-  try { await checkRepo(); } catch (e) { statusBox("repo-status", "err", esc(e.message)); }
+  try {
+    await api("/api/gh/token", { token: val("gh_token"), remember: $("gh_remember").checked });
+    $("gh_token").value = "";
+    await onLoggedIn();
+  } catch (e) { toast(esc(e.message), "err"); }
+  finally { busy(btn, false); }
+});
+
+let devicePoll = null;
+$("btn-gh-login").addEventListener("click", async () => {
+  const btn = $("btn-gh-login");
+  busy(btn, true);
+  try {
+    const d = await api("/api/gh/device", { remember: $("gh_remember").checked });
+    $("device-code").textContent = d.user_code;
+    $("device-open").href = d.verification_uri;
+    $("device-dialog").showModal();
+    window.open(d.verification_uri, "_blank", "noopener");
+    clearInterval(devicePoll);
+    devicePoll = setInterval(async () => {
+      const r = await api("/api/gh/device").catch(() => ({ state: "pending" }));
+      if (r.state === "pending") return;
+      clearInterval(devicePoll);
+      $("device-dialog").close();
+      if (r.state === "ok") await onLoggedIn();
+      else toast(esc(r.message || "Đăng nhập không thành công."), "err");
+    }, 2000);
+  } catch (e) { toast(esc(e.message), "err"); }
+  finally { busy(btn, false); }
+});
+$("device-cancel").addEventListener("click", () => { clearInterval(devicePoll); $("device-dialog").close(); });
+$("btn-copy-code").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("device-code").textContent); toast("Đã sao chép mã.", "ok"); } catch { /* người dùng tự chọn mã */ }
+});
+
+$("btn-gh-logout").addEventListener("click", async () => {
+  ghStatus = await api("/api/gh/logout", {});
+  selectedRepo = null;
+  $("repo").value = "";
+  renderAccount();
+  repos = []; renderRepos(); updatePushTarget();
+});
+
+async function loadRepos() {
+  $("repo-list").innerHTML = `<li class="hint"><span class="spinner"></span>Đang tải danh sách repo…</li>`;
+  try {
+    repos = (await api("/api/gh/repos")).repos;
+    const saved = val("repo");
+    selectedRepo = repos.find((r) => r.full_name === saved) || null;
+    renderRepos();
+    updatePushTarget();
+  } catch (e) { $("repo-list").innerHTML = `<li class="hint">${esc(e.message)}</li>`; }
+}
+
+function renderRepos() {
+  const q = $("repo-search").value.toLowerCase();
+  const shown = repos.filter((r) => r.full_name.toLowerCase().includes(q));
+  if (!ghStatus?.logged_in) {
+    $("repo-list").innerHTML = `<li class="hint">Đăng nhập GitHub để xem danh sách repo.</li>`;
+    return;
+  }
+  $("repo-list").innerHTML = shown.length ? shown.map((r) => `
+    <li data-repo="${esc(r.full_name)}" class="${selectedRepo?.full_name === r.full_name ? "selected" : ""}">
+      ${icon(selectedRepo?.full_name === r.full_name ? "check" : "folder")}
+      <span class="r-name">${esc(r.full_name)}${r.description ? `<small>${esc(r.description)}</small>` : ""}</span>
+      ${r.private ? `<span class="tag private">${icon("lock")}Private</span>` : `<span class="tag public">Public</span>`}
+    </li>`).join("")
+    : `<li class="hint">${repos.length ? "Không có repo khớp." : "Bạn chưa có repo nào có quyền ghi — hãy tạo repo mới."}</li>`;
+}
+$("repo-search").addEventListener("input", renderRepos);
+$("btn-reload-repos").addEventListener("click", loadRepos);
+$("repo-list").addEventListener("click", (ev) => {
+  const li = ev.target.closest("li[data-repo]");
+  if (!li) return;
+  selectRepo(repos.find((r) => r.full_name === li.dataset.repo));
+});
+function selectRepo(r) {
+  selectedRepo = r;
+  $("repo").value = r.full_name;
+  $("branch").value = r.default_branch;
+  renderRepos();
+  updatePushTarget();
+}
+function updatePushTarget() {
+  $("push-target").innerHTML = selectedRepo
+    ? `→ <b>${esc(selectedRepo.full_name)}</b> · nhánh <code>${esc(val("branch") || selectedRepo.default_branch)}</code>${val("subdir") ? ` · thư mục <code>${esc(val("subdir"))}</code>` : ""}`
+    : "";
+}
+["branch", "subdir"].forEach((id) => $(id).addEventListener("input", updatePushTarget));
+
+$("btn-new-repo").addEventListener("click", () => {
+  $("new-repo").hidden = false;
+  $("new-repo").style.setProperty("--prefix-w", $("new-repo-owner").offsetWidth + "px");
+  $("new-repo-name").focus();
+});
+$("btn-cancel-repo").addEventListener("click", () => { $("new-repo").hidden = true; });
+$("btn-create-repo").addEventListener("click", async () => {
+  if (!requireFields(["new-repo-name"])) return;
+  const btn = $("btn-create-repo");
+  busy(btn, true);
+  try {
+    const r = await api("/api/gh/create-repo", { name: val("new-repo-name"), private: $("new-repo-private").checked });
+    repos.unshift(r);
+    $("new-repo").hidden = true;
+    $("new-repo-name").value = "";
+    selectRepo(r);
+    toast(`Đã tạo repo <b>${esc(r.full_name)}</b>.`, "ok");
+  } catch (e) { toast(esc(e.message), "err"); }
   finally { busy(btn, false); }
 });
 
@@ -333,34 +459,42 @@ function confirmPublic() {
 }
 
 $("btn-push").addEventListener("click", async () => {
-  if (!requireFields(["repo", "gh_token"])) return;
+  if (!ghStatus?.logged_in) { toast("Hãy đăng nhập GitHub trước.", "err"); return; }
+  if (!selectedRepo) { toast("Hãy chọn một repository.", "err"); $("repo-search").focus(); return; }
   if (!val("output")) { toast("Chưa có thư mục kết quả. Hãy export ở bước 2.", "err"); goto("export"); return; }
+  if (!selectedRepo.private && !(await confirmPublic())) return;
   const btn = $("btn-push");
   busy(btn, true);
   $("push-result").hidden = true;
+  $("push-error").hidden = true;
   try {
-    await checkRepo();
-    if (repoPublic && !(await confirmPublic())) { busy(btn, false); return; }
     await api("/api/push", {
-      repo: val("repo"), branch: val("branch"), gh_token: val("gh_token"), subdir: val("subdir"),
-      message: val("message"), output: val("output"), allow_public: repoPublic,
+      repo: selectedRepo.full_name, branch: val("branch"), subdir: val("subdir"),
+      message: val("message"), output: val("output"), allow_public: !selectedRepo.private,
     });
     startPolling("push");
   } catch (e) {
     busy(btn, false);
-    statusBox("repo-status", "err", esc(e.message));
+    statusBox("push-error", "err", esc(e.message));
   }
 });
 
 jobHandlers.push = (job) => {
   busy($("btn-push"), false);
   if (!job.ok) {
-    toast("Push không thành công. Xem chi tiết trong <b>Nhật ký hoạt động</b>.", "err");
+    const reason = [...$("log").textContent.split("\n")].reverse().find((l) => l.includes("Lỗi") || l.includes("lỗi"));
+    statusBox("push-error", "err", esc(reason || "Push không thành công.") + "<br><small>Chi tiết nằm trong Nhật ký hoạt động bên dưới.</small>");
+    toast("Push không thành công.", "err");
     return;
   }
   markDone("github");
   const n = job.result?.files ?? 0;
   $("push-result-text").textContent = n ? `${n} file mới hoặc đã thay đổi được tải lên.` : "Không có thay đổi nào so với GitHub.";
+  const skipped = job.result?.skipped || [];
+  if (skipped.length) {
+    $("push-result-text").textContent += ` Bỏ qua ${skipped.length} file quá lớn (>40MB) — trong tài liệu đã thay bằng ghi chú dẫn về Confluence.`;
+    toast(`Đã bỏ qua ${skipped.length} file quá lớn — xem chi tiết trong nhật ký.`, "info");
+  }
   $("push-result-link").href = job.result?.url || "#";
   $("push-result").hidden = false;
   toast("Đã đưa tài liệu lên GitHub.", "ok");
@@ -374,6 +508,7 @@ jobHandlers.push = (job) => {
     const s = await api("/api/settings");
     for (const k of ["base_url", "email", "output", "repo", "branch", "subdir"]) if (s[k]) $(k).value = s[k];
     $("version").textContent = "v" + s.version;
+    refreshGitHub().catch(() => {});
     const job = await api("/api/job");
     if (job.running) {
       busy($(job.kind === "push" ? "btn-push" : "btn-export"), true);
