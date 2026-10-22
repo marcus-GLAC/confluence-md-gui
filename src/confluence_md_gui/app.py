@@ -75,6 +75,7 @@ class Job:
         self.ok: bool | None = None
         self.proc: subprocess.Popen | None = None
         self.cancelled = False
+        self.result: dict = {}
 
     def log(self, text: str) -> None:
         self.lines.extend(text.rstrip("\n").split("\n"))
@@ -196,6 +197,51 @@ def check_links(output: Path, strip_query: bool) -> dict:
 
 
 # ---------------------------------------------------------------- preview
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp"}
+
+
+def export_stats(output: Path) -> dict:
+    stats = {"exists": output.is_dir(), "pages": 0, "images": 0, "other": 0, "bytes": 0}
+    if not stats["exists"]:
+        return stats
+    for f in output.rglob("*"):
+        if not f.is_file():
+            continue
+        stats["bytes"] += f.stat().st_size
+        if f.suffix.lower() == ".md":
+            stats["pages"] += 1
+        elif f.suffix.lower() in IMAGE_EXTS:
+            stats["images"] += 1
+        else:
+            stats["other"] += 1
+    return stats
+
+
+def confluence_check(base_url: str, email: str, token: str) -> dict:
+    base_url = base_url.strip().rstrip("/")
+    if not base_url.startswith("https://"):
+        raise ValueError("Địa chỉ Confluence phải bắt đầu bằng https://")
+    auth = base64.b64encode(f"{email.strip()}:{token.strip()}".encode()).decode()
+    req = urllib.request.Request(
+        base_url + "/wiki/rest/api/user/current",
+        headers={"Authorization": f"Basic {auth}", "Accept": "application/json", "User-Agent": APP_NAME},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as err:
+        if err.code in (401, 403):
+            raise ValueError("Email hoặc API token không đúng.") from err
+        if err.code == 404:
+            raise ValueError("Không tìm thấy Confluence tại địa chỉ này. Kiểm tra lại địa chỉ.") from err
+        raise ValueError(f"Confluence trả về lỗi {err.code}. Kiểm tra lại địa chỉ.") from err
+    except urllib.error.URLError as err:
+        raise ValueError(f"Không kết nối được tới {base_url}: {err.reason}") from err
+    if data.get("type") == "anonymous" or not data.get("accountId"):
+        raise ValueError("Email hoặc API token không đúng.")
+    return {"name": data.get("displayName") or email, "email": data.get("email") or email}
+
 
 def list_markdown(output: Path) -> list[str]:
     if not output.is_dir():
@@ -332,6 +378,7 @@ def run_push(job: Job, p: dict) -> bool:
     for rel in skipped_big:
         job.log(f"  ⚠ Bỏ qua {rel}: lớn hơn 100MB (giới hạn của GitHub)")
     if not entries:
+        job.result = {"url": f"https://github.com/{repo}/tree/{branch}/{subdir}".rstrip("/"), "files": 0}
         job.log("✅ Không có thay đổi nào so với GitHub.")
         return True
 
@@ -344,7 +391,9 @@ def run_push(job: Job, p: dict) -> bool:
         api("PATCH", f"/git/refs/heads/{branch}", {"sha": commit})
     else:
         api("POST", "/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit})
-    job.log(f"✅ Đã push {len(entries)} file. Xem tại: https://github.com/{repo}/tree/{branch}/{subdir}")
+    url = f"https://github.com/{repo}/tree/{branch}/{subdir}".rstrip("/")
+    job.result = {"url": url, "files": len(entries)}
+    job.log(f"✅ Đã push {len(entries)} file. Xem tại: {url}")
     return True
 
 
@@ -387,27 +436,33 @@ class Handler(BaseHTTPRequestHandler):
             page = (STATIC_DIR / "index.html").read_bytes()
             cookie = f"session={SESSION}; Path=/; HttpOnly; SameSite=Strict"
             # Phần xem trước chèn HTML từ Confluence: CSP chặn mọi script lạ trong đó.
-            csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:"
+            csp = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                   "img-src 'self' https: data:; font-src 'self'")
             return self._send(200, page, "text/html; charset=utf-8",
                               {"Set-Cookie": cookie, "Content-Security-Policy": csp})
         if url.path.startswith("/static/"):
             try:
                 f = safe_path(STATIC_DIR, url.path.removeprefix("/static/"))
-                ctype = {".css": "text/css", ".js": "application/javascript"}.get(f.suffix, "application/octet-stream")
-                return self._send(200, f.read_bytes(), ctype + "; charset=utf-8")
+                ctype = {".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8",
+                         ".woff2": "font/woff2", ".svg": "image/svg+xml"}.get(f.suffix, "application/octet-stream")
+                return self._send(200, f.read_bytes(), ctype)
             except (ValueError, OSError):
                 return self._error("Không tìm thấy", 404)
         if not self._authorized():
             return self._error("Phiên không hợp lệ, hãy tải lại trang.", 403)
         try:
             if url.path == "/api/settings":
-                return self._json(load_settings())
+                from confluence_md_gui import __version__
+
+                return self._json({**load_settings(), "version": __version__})
+            if url.path == "/api/stats":
+                return self._json(export_stats(Path(q["output"]).expanduser()))
             if url.path == "/api/job":
                 job = Job.current
                 if not job:
                     return self._json({"running": False, "lines": [], "total": 0})
                 since = int(q.get("since", 0))
-                return self._json({"kind": job.kind, "running": job.running, "ok": job.ok,
+                return self._json({"kind": job.kind, "running": job.running, "ok": job.ok, "result": job.result,
                                    "lines": job.lines[since:], "total": len(job.lines)})
             if url.path == "/api/tree":
                 return self._json({"files": list_markdown(Path(q["output"]).expanduser())})
@@ -453,6 +508,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if path == "/api/check-links":
                 return self._json(check_links(Path(p["output"]).expanduser(), bool(p.get("strip_query"))))
+            if path == "/api/confluence-check":
+                save_settings(p)
+                return self._json(confluence_check(p["base_url"], p["email"], p["token"]))
             if path == "/api/github-check":
                 return self._json(github_check(p["repo"], p["gh_token"]))
         except (ValueError, OSError, KeyError) as exc:

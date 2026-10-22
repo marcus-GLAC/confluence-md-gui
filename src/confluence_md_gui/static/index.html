@@ -4,108 +4,268 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Confluence → Markdown</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <h1>Confluence → Markdown</h1>
-  <p>Export trang Confluence ra .md (kèm ảnh) và đẩy lên GitHub.</p>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 2v6M15 2v6M6 8h12v3a6 6 0 0 1-12 0V8zM12 17v5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 19h16"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 21V9M7 14l5-5 5 5M4 5h16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3l10 18H2L12 3z"/><path d="M12 10v5M12 18v.5"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8l-5-5z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></symbol>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <img src="/static/logo.svg" alt="" width="36" height="36">
+    <div>
+      <div class="brand-title">Confluence → Markdown</div>
+      <div class="brand-sub">Chuyển tài liệu Confluence sang GitHub <span id="version"></span></div>
+    </div>
+  </div>
+  <div id="job-pill" class="pill idle"><span class="dot"></span><span id="job-pill-text">Sẵn sàng</span></div>
 </header>
 
-<nav class="tabs">
-  <button data-tab="export" class="active">1. Export</button>
-  <button data-tab="links">2. Kiểm tra ảnh</button>
-  <button data-tab="preview">3. Xem trước</button>
-  <button data-tab="github">4. GitHub</button>
-</nav>
-
-<main>
-  <section id="tab-export" class="panel active">
-    <div class="grid">
-      <label>Địa chỉ Confluence
-        <input id="base_url" placeholder="https://congty.atlassian.net">
-      </label>
-      <label>Email đăng nhập
-        <input id="email" type="email" placeholder="ban@congty.com">
-      </label>
-      <label class="full">API token
-        <input id="token" type="password" placeholder="Không được lưu lại – nhập mỗi lần mở app">
-        <small>Tạo tại <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank">id.atlassian.com → Security → API tokens</a></small>
-      </label>
-      <label>Kiểu export
-        <select id="mode">
-          <option value="pages">Một trang</option>
-          <option value="pages-with-descendants" selected>Trang + các trang con</option>
-          <option value="folders">Cả folder</option>
-          <option value="spaces">Cả space</option>
-        </select>
-      </label>
-      <label>Link trang / folder / space
-        <input id="target_url" placeholder="https://congty.atlassian.net/wiki/spaces/ABC/pages/123456/Ten+trang">
-      </label>
-      <label class="full">Thư mục lưu kết quả
-        <input id="output" placeholder="C:\cme-export">
-        <small>Nên đặt đường dẫn ngắn (Windows giới hạn ~260 ký tự cho đường dẫn).</small>
-      </label>
+<div class="shell">
+  <nav class="steps" aria-label="Các bước">
+    <ol>
+      <li><button data-step="connect"><span class="step-icon"><svg><use href="#i-plug"/></svg></span>
+        <span class="step-text"><b>Kết nối Confluence</b><small>Tài khoản & API token</small></span></button></li>
+      <li><button data-step="export"><span class="step-icon"><svg><use href="#i-download"/></svg></span>
+        <span class="step-text"><b>Export tài liệu</b><small>Chọn trang hoặc space</small></span></button></li>
+      <li><button data-step="links"><span class="step-icon"><svg><use href="#i-image"/></svg></span>
+        <span class="step-text"><b>Kiểm tra hình ảnh</b><small>Đảm bảo ảnh hiện trên GitHub</small></span></button></li>
+      <li><button data-step="preview"><span class="step-icon"><svg><use href="#i-eye"/></svg></span>
+        <span class="step-text"><b>Xem trước</b><small>Duyệt nội dung đã export</small></span></button></li>
+      <li><button data-step="github"><span class="step-icon"><svg><use href="#i-upload"/></svg></span>
+        <span class="step-text"><b>Đưa lên GitHub</b><small>Commit & push vào repo</small></span></button></li>
+    </ol>
+    <div class="side-note">
+      <svg><use href="#i-lock"/></svg>
+      <p>Ứng dụng chạy trên máy của bạn. Token chỉ dùng trong phiên làm việc và <b>không được lưu lại</b>.</p>
     </div>
-    <div class="actions">
-      <button id="btn-export" class="primary">Bắt đầu export</button>
-      <button class="btn-cancel">Dừng</button>
-    </div>
-  </section>
+  </nav>
 
-  <section id="tab-links" class="panel">
-    <p>Quét các file .md trong thư mục kết quả để tìm ảnh sẽ <b>không hiển thị</b> trên GitHub.</p>
-    <label class="check"><input type="checkbox" id="strip_query"> Tự xoá phần <code>?width=…</code> ở cuối link ảnh</label>
-    <div class="actions"><button id="btn-links" class="primary">Kiểm tra</button></div>
-    <div id="links-report"></div>
-  </section>
+  <main>
+    <!-- 1. Connect -->
+    <section class="panel" id="step-connect">
+      <div class="panel-head">
+        <span class="eyebrow">Bước 1 / 5</span>
+        <h1>Kết nối Confluence</h1>
+        <p>Nhập thông tin tài khoản Atlassian để ứng dụng đọc được các trang tài liệu.</p>
+      </div>
+      <div class="card">
+        <div class="form-grid">
+          <div class="field full">
+            <label for="base_url">Địa chỉ Confluence</label>
+            <input id="base_url" placeholder="https://congty.atlassian.net" autocomplete="url">
+            <p class="hint">Phần đầu của đường dẫn khi bạn mở Confluence, ví dụ <code>https://congty.atlassian.net</code>.</p>
+          </div>
+          <div class="field">
+            <label for="email">Email đăng nhập</label>
+            <input id="email" type="email" placeholder="ban@congty.com" autocomplete="email">
+          </div>
+          <div class="field">
+            <label for="token">API token</label>
+            <div class="input-group">
+              <input id="token" type="password" placeholder="Dán API token" autocomplete="off">
+              <button type="button" class="ghost toggle-secret" data-target="token">Hiện</button>
+            </div>
+            <p class="hint"><a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">Tạo API token</a> → <i>Create API token</i> → sao chép và dán vào đây.</p>
+          </div>
+        </div>
+        <div id="connect-status" class="status-box" hidden></div>
+      </div>
+      <div class="panel-actions">
+        <button id="btn-connect" class="primary"><svg><use href="#i-plug"/></svg>Kiểm tra kết nối</button>
+        <button class="secondary next" data-goto="export">Tiếp tục<svg><use href="#i-arrow"/></svg></button>
+      </div>
+    </section>
 
-  <section id="tab-preview" class="panel">
-    <div class="preview">
-      <aside>
-        <button id="btn-refresh">↻ Tải lại danh sách</button>
-        <input id="filter" placeholder="Lọc theo tên…">
-        <ul id="file-list"></ul>
-      </aside>
-      <article id="preview-body" class="markdown"><p class="muted">Chọn một file bên trái để xem.</p></article>
-    </div>
-  </section>
+    <!-- 2. Export -->
+    <section class="panel" id="step-export">
+      <div class="panel-head">
+        <span class="eyebrow">Bước 2 / 5</span>
+        <h1>Export tài liệu</h1>
+        <p>Dán đường dẫn trang, folder hoặc space trên Confluence. Ứng dụng sẽ tự nhận biết loại nội dung.</p>
+      </div>
+      <div class="card">
+        <div class="field">
+          <label for="target_url">Đường dẫn Confluence</label>
+          <input id="target_url" placeholder="https://congty.atlassian.net/wiki/spaces/ABC/pages/123456/Ten-trang">
+          <p class="hint" id="detect-hint">Mở trang trên trình duyệt, sao chép địa chỉ trên thanh URL và dán vào đây.</p>
+        </div>
+        <div class="field">
+          <label>Phạm vi export</label>
+          <div class="segmented" id="mode" role="radiogroup">
+            <button type="button" data-value="pages" role="radio"><b>Một trang</b><small>Chỉ trang này</small></button>
+            <button type="button" data-value="pages-with-descendants" role="radio"><b>Trang + trang con</b><small>Toàn bộ nhánh</small></button>
+            <button type="button" data-value="folders" role="radio"><b>Folder</b><small>Mọi trang trong folder</small></button>
+            <button type="button" data-value="spaces" role="radio"><b>Cả space</b><small>Toàn bộ không gian</small></button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="output">Thư mục lưu kết quả</label>
+          <div class="input-group">
+            <span class="input-icon"><svg><use href="#i-folder"/></svg></span>
+            <input id="output" placeholder="C:\cme-export">
+          </div>
+          <p class="hint">Nên dùng đường dẫn ngắn. Lần export sau chỉ tải lại những trang có thay đổi.</p>
+        </div>
+      </div>
 
-  <section id="tab-github" class="panel">
-    <div class="grid">
-      <label>Repo GitHub
-        <input id="repo" placeholder="owner/ten-repo hoặc https://github.com/owner/ten-repo">
-      </label>
-      <label>Nhánh
-        <input id="branch" placeholder="main">
-      </label>
-      <label class="full">GitHub token
-        <input id="gh_token" type="password" placeholder="Fine-grained token, quyền Contents: Read and write">
-        <small>Tạo tại <a href="https://github.com/settings/personal-access-tokens/new" target="_blank">GitHub → Settings → Developer settings → Fine-grained tokens</a>. Không được lưu lại.</small>
-      </label>
-      <label>Thư mục con trong repo (tuỳ chọn)
-        <input id="subdir" placeholder="docs">
-      </label>
-      <label>Nội dung commit
-        <input id="message" placeholder="Cập nhật tài liệu từ Confluence">
-      </label>
-    </div>
-    <div id="repo-info"></div>
-    <label class="check"><input type="checkbox" id="allow_public"> Tôi xác nhận muốn đẩy lên repo <b>public</b> (ai cũng xem được)</label>
-    <div class="actions">
-      <button id="btn-gh-check">Kiểm tra repo</button>
-      <button id="btn-push" class="primary">Push lên GitHub</button>
-      <button class="btn-cancel">Dừng</button>
-    </div>
-    <p class="muted">Chỉ file mới hoặc đã thay đổi được tải lên. File đã xoá ở máy sẽ không bị xoá trên GitHub.</p>
-  </section>
+      <div id="export-error" class="status-box err" hidden></div>
+      <div id="export-result" class="card result" hidden>
+        <div class="result-head"><span class="badge-icon ok"><svg><use href="#i-check"/></svg></span>
+          <div><h3>Export hoàn tất</h3><p id="export-result-path"></p></div></div>
+        <div class="stats" id="export-stats"></div>
+      </div>
 
-  <section class="log-wrap">
-    <div class="log-head"><span>Nhật ký</span><span id="status"></span></div>
-    <pre id="log"></pre>
-  </section>
-</main>
+      <div class="panel-actions">
+        <button id="btn-export" class="primary"><svg><use href="#i-download"/></svg>Bắt đầu export</button>
+        <button class="danger-ghost btn-cancel" hidden><svg><use href="#i-stop"/></svg>Dừng</button>
+        <button class="secondary next" data-goto="links">Tiếp tục<svg><use href="#i-arrow"/></svg></button>
+      </div>
+    </section>
+
+    <!-- 3. Links -->
+    <section class="panel" id="step-links">
+      <div class="panel-head">
+        <span class="eyebrow">Bước 3 / 5</span>
+        <h1>Kiểm tra hình ảnh</h1>
+        <p>Quét các file Markdown để tìm ảnh sẽ không hiển thị được trên GitHub.</p>
+      </div>
+      <div class="card">
+        <div class="toolbar">
+          <label class="switch"><input type="checkbox" id="strip_query" checked><span></span>
+            Tự sửa link ảnh có tham số <code>?width=…</code></label>
+          <button id="btn-links" class="primary"><svg><use href="#i-search"/></svg>Quét ngay</button>
+        </div>
+        <div id="links-report"><div class="empty"><svg><use href="#i-image"/></svg><p>Bấm <b>Quét ngay</b> để kiểm tra thư mục kết quả.</p></div></div>
+      </div>
+      <div class="panel-actions">
+        <button class="secondary next" data-goto="preview">Tiếp tục<svg><use href="#i-arrow"/></svg></button>
+      </div>
+    </section>
+
+    <!-- 4. Preview -->
+    <section class="panel wide" id="step-preview">
+      <div class="panel-head">
+        <span class="eyebrow">Bước 4 / 5</span>
+        <h1>Xem trước</h1>
+        <p>Kiểm tra nội dung và hình ảnh trước khi đưa lên GitHub.</p>
+      </div>
+      <div class="card preview">
+        <aside>
+          <div class="input-group">
+            <span class="input-icon"><svg><use href="#i-search"/></svg></span>
+            <input id="filter" placeholder="Tìm file…">
+            <button type="button" class="ghost icon-only" id="btn-refresh" title="Tải lại"><svg><use href="#i-refresh"/></svg></button>
+          </div>
+          <p class="hint" id="file-count"></p>
+          <ul id="file-list"></ul>
+        </aside>
+        <article id="preview-body" class="markdown">
+          <div class="empty"><svg><use href="#i-file"/></svg><p>Chọn một file bên trái để xem nội dung.</p></div>
+        </article>
+      </div>
+      <div class="panel-actions">
+        <button class="secondary next" data-goto="github">Tiếp tục<svg><use href="#i-arrow"/></svg></button>
+      </div>
+    </section>
+
+    <!-- 5. GitHub -->
+    <section class="panel" id="step-github">
+      <div class="panel-head">
+        <span class="eyebrow">Bước 5 / 5</span>
+        <h1>Đưa lên GitHub</h1>
+        <p>Chỉ những file mới hoặc đã thay đổi được tải lên. Máy bạn không cần cài Git.</p>
+      </div>
+      <div class="card">
+        <div class="form-grid">
+          <div class="field full">
+            <label for="repo">Repository</label>
+            <input id="repo" placeholder="owner/ten-repo hoặc https://github.com/owner/ten-repo">
+          </div>
+          <div class="field full">
+            <label for="gh_token">GitHub token</label>
+            <div class="input-group">
+              <input id="gh_token" type="password" placeholder="github_pat_…" autocomplete="off">
+              <button type="button" class="ghost toggle-secret" data-target="gh_token">Hiện</button>
+            </div>
+            <p class="hint"><a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">Tạo fine-grained token</a>: chọn repo đích, cấp quyền <b>Contents: Read and write</b>.</p>
+          </div>
+          <div class="field">
+            <label for="branch">Nhánh</label>
+            <input id="branch" placeholder="main">
+          </div>
+          <div class="field">
+            <label for="subdir">Thư mục trong repo <span class="opt">(tuỳ chọn)</span></label>
+            <input id="subdir" placeholder="docs">
+          </div>
+          <div class="field full">
+            <label for="message">Nội dung commit</label>
+            <input id="message" placeholder="Cập nhật tài liệu từ Confluence">
+          </div>
+        </div>
+        <div id="repo-status" class="status-box" hidden></div>
+      </div>
+
+      <div id="push-result" class="card result" hidden>
+        <div class="result-head"><span class="badge-icon ok"><svg><use href="#i-check"/></svg></span>
+          <div><h3>Đã đưa lên GitHub</h3><p id="push-result-text"></p></div>
+          <a id="push-result-link" class="button primary" target="_blank" rel="noopener">Mở trên GitHub<svg><use href="#i-external"/></svg></a></div>
+      </div>
+
+      <div class="panel-actions">
+        <button id="btn-gh-check" class="secondary"><svg><use href="#i-search"/></svg>Kiểm tra repo</button>
+        <button id="btn-push" class="primary"><svg><use href="#i-upload"/></svg>Push lên GitHub</button>
+        <button class="danger-ghost btn-cancel" hidden><svg><use href="#i-stop"/></svg>Dừng</button>
+      </div>
+      <p class="hint footnote">File đã xoá trên máy sẽ không bị xoá trên GitHub.</p>
+    </section>
+  </main>
+</div>
+
+<section class="console" id="console">
+  <header>
+    <button type="button" id="console-toggle" class="console-title"><svg><use href="#i-terminal"/></svg>Nhật ký hoạt động
+      <span id="console-count" class="count"></span><svg class="chev"><use href="#i-chevron"/></svg></button>
+    <button type="button" class="ghost small" id="btn-copy-log"><svg><use href="#i-copy"/></svg>Sao chép</button>
+  </header>
+  <pre id="log"></pre>
+</section>
+
+<div id="toasts" aria-live="polite"></div>
+
+<dialog id="confirm-public">
+  <div class="dialog-body">
+    <span class="badge-icon warn"><svg><use href="#i-alert"/></svg></span>
+    <h3>Repo này đang ở chế độ công khai</h3>
+    <p>Bất kỳ ai trên Internet cũng xem được tài liệu sau khi push. Hãy chắc chắn nội dung không chứa thông tin nội bộ.</p>
+  </div>
+  <div class="dialog-actions">
+    <button class="secondary" value="cancel" id="public-cancel">Huỷ</button>
+    <button class="primary warn" value="ok" id="public-ok">Tôi hiểu, vẫn push</button>
+  </div>
+</dialog>
+
 <script src="/static/app.js"></script>
 </body>
 </html>
