@@ -361,7 +361,7 @@ function deleteDoc(doc) {
     try {
       const r = await api("/api/doc/delete", { output: val("output"), path: doc.path });
       dlg.close();
-      docsSelected.delete(doc.path);
+      picked.delete(doc.path);
       if (currentDoc?.path === doc.path) clearPreview();
       toast(`Đã xoá <b>${esc(docLabel(doc))}</b>${r.assets ? ` và ${r.assets} tệp đính kèm` : ""}.`, "ok");
       await refreshDocLists();
@@ -488,8 +488,10 @@ function selectRepo(r) {
   $("branch").value = r.default_branch;
   renderRepos();
   updatePushTarget();
+  if (docsLoadedFor) loadLayout().catch((e) => toast(esc(e.message), "err"));
 }
 function updatePushTarget() {
+  if (docsLoadedFor) renderDocs();
   $("push-target").innerHTML = selectedRepo
     ? `→ <b>${esc(selectedRepo.full_name)}</b> · nhánh <code>${esc(val("branch") || selectedRepo.default_branch)}</code>${val("subdir") ? ` · thư mục <code>${esc(val("subdir"))}</code>` : ""}`
     : "";
@@ -517,9 +519,15 @@ $("btn-create-repo").addEventListener("click", async () => {
   finally { busy(btn, false); }
 });
 
-// ---- chọn tài liệu
-let docs = [], docsSelected = new Set(), docsLoadedFor = null;
-const collapsed = new Set();
+// ---- sắp xếp tài liệu: cột Confluence (nguồn) → cột GitHub (cấu trúc ảo sẽ push)
+let docs = [], docsLoadedFor = null, picked = new Set();
+const collapsed = new Set(), tCollapsed = new Set();
+// layout: folders = các thư mục ảo, docs = {khoá tài liệu → thư mục}, known = tài liệu đã từng thấy (để nhận ra tài liệu mới).
+let layout = { folders: new Set(), docs: new Map(), known: new Set() }, layoutFor = null, activeFolder = "", dragging = null;
+const joinPath = (...parts) => parts.filter(Boolean).join("/");
+const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
+const dirName = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+const layoutKey = () => val("repo");
 
 async function loadDocs(force = false) {
   const out = val("output");
@@ -529,11 +537,145 @@ async function loadDocs(force = false) {
   try {
     docs = (await api("/api/docs?output=" + encodeURIComponent(out))).docs;
     const known = new Set(docs.map((d) => d.path));
-    // Lần đầu (hoặc đổi thư mục) chọn tất cả; giữ lựa chọn cũ nếu chỉ tải lại.
-    docsSelected = docsLoadedFor === out ? new Set([...docsSelected].filter((p) => known.has(p))) : new Set(known);
+    picked = new Set([...picked].filter((p) => known.has(p)));
+    if (docsLoadedFor !== out) layoutFor = null;
     docsLoadedFor = out;
-    renderDocs();
+    await loadLayout();
   } catch (e) { $("docs-tree").innerHTML = `<div class="empty-row">${esc(e.message)}</div>`; }
+}
+
+async function loadLayout() {
+  const key = layoutKey();
+  if (layoutFor !== key) {
+    const saved = (await api("/api/layout?" + new URLSearchParams({ output: val("output"), repo: key }))).layout;
+    if (saved) {
+      layout = { folders: new Set(saved.folders), docs: new Map(Object.entries(saved.docs)), known: new Set(saved.known) };
+    } else if (layoutFor === null || !layout.docs.size) {
+      // Lần đầu: dựng sẵn cấu trúc từ Confluence (bỏ phần thư mục chung) để người dùng chỉ việc chỉnh lại.
+      layout = { folders: new Set(), docs: new Map(), known: new Set() };
+      autoPlace(docs);
+    } // còn lại: vừa chọn repo khác mà chưa có cấu trúc → giữ cấu trúc đang sắp cho repo này.
+    layoutFor = key;
+    activeFolder = layout.folders.has(activeFolder) ? activeFolder : "";
+    if (!saved) saveLayout();
+  }
+  renderDocs();
+}
+
+let saving = Promise.resolve();
+function saveLayout() {
+  // Lưu ngay mỗi lần thay đổi, nối tiếp nhau để bản cũ không ghi đè bản mới.
+  const body = { output: val("output"), repo: layoutKey(), layout: { folders: [...layout.folders], docs: Object.fromEntries(layout.docs), known: [...layout.known] } };
+  saving = saving.then(() => api("/api/layout", body)).catch((e) => toast("Không lưu được cách sắp xếp: " + esc(e.message), "err"));
+}
+function changed() { saveLayout(); renderDocs(); }
+
+function addFolder(path) {
+  for (let p = path; p; p = dirName(p)) layout.folders.add(p);
+}
+function commonDir(paths) {
+  const dirs = paths.map((p) => dirName(p).split("/").filter(Boolean));
+  if (!dirs.length) return [];
+  let n = Math.min(...dirs.map((d) => d.length));
+  for (let i = 0; i < n; i++) if (dirs.some((d) => d[i] !== dirs[0][i])) { n = i; break; }
+  return dirs[0].slice(0, n);
+}
+function autoPlace(list) {
+  const cut = commonDir(docs.map((d) => d.path)).length;
+  for (const d of list) {
+    const folder = dirName(d.path).split("/").filter(Boolean).slice(cut).join("/");
+    addFolder(folder);
+    layout.docs.set(d.key, folder);
+    layout.known.add(d.key);
+  }
+}
+
+const placed = () => docs.filter((d) => layout.docs.has(d.key));
+const targetOf = (d) => joinPath(layout.docs.get(d.key), d.name);
+function conflicts() {
+  const seen = new Map();
+  placed().forEach((d) => { const t = targetOf(d).toLowerCase(); seen.set(t, (seen.get(t) || 0) + 1); });
+  return new Set([...seen].filter(([, n]) => n > 1).map(([t]) => t));
+}
+
+function placeDocs(list, folder) {
+  list.forEach((d) => { layout.docs.set(d.key, folder); layout.known.add(d.key); });
+  addFolder(folder);
+  changed();
+}
+function placeSourceFolder(cpath, folder) {
+  const list = docs.filter((d) => d.path.startsWith(cpath + "/"));
+  const root = joinPath(folder, baseName(cpath));
+  list.forEach((d) => {
+    const sub = joinPath(root, dirName(d.path).slice(cpath.length + 1));
+    addFolder(sub);
+    layout.docs.set(d.key, sub);
+    layout.known.add(d.key);
+  });
+  addFolder(root);
+  changed();
+  return list.length;
+}
+function moveFolder(src, parent) {
+  const dest = joinPath(parent, baseName(src));
+  if (dest === src) return;
+  if (parent === src || parent.startsWith(src + "/")) { toast("Không thể chuyển thư mục vào chính nó.", "err"); return; }
+  if (layout.folders.has(dest)) { toast(`Đã có thư mục <b>${esc(dest)}</b>.`, "err"); return; }
+  const remap = (p) => (p === src ? dest : p.startsWith(src + "/") ? dest + p.slice(src.length) : p);
+  layout.folders = new Set([...layout.folders].map(remap));
+  layout.docs.forEach((f, k) => layout.docs.set(k, remap(f)));
+  addFolder(dest);
+  if (activeFolder === src || activeFolder.startsWith(src + "/")) activeFolder = remap(activeFolder);
+  changed();
+}
+function deleteFolder(path) {
+  const inside = (p) => p === path || p.startsWith(path + "/");
+  const n = placed().filter((d) => inside(layout.docs.get(d.key))).length;
+  if (n && !confirm(`Thư mục "${baseName(path)}" có ${n} tài liệu. Xoá thư mục và đưa các tài liệu này về lại cột Confluence?`)) return;
+  layout.folders = new Set([...layout.folders].filter((p) => !inside(p)));
+  [...layout.docs].forEach(([k, f]) => inside(f) && layout.docs.delete(k));
+  if (inside(activeFolder)) activeFolder = dirName(path);
+  changed();
+}
+
+function folderDialog({ title, parent, value = "", onSave }) {
+  const dlg = $("folder-dialog"), input = $("folder-input"), err = $("folder-error");
+  $("folder-title").textContent = title;
+  $("folder-parent").innerHTML = `Trong: <code>${esc(rootLabel() + (parent ? "/" + parent : ""))}</code>`;
+  input.value = value;
+  err.hidden = true;
+  $("folder-form").onsubmit = (ev) => {
+    ev.preventDefault();
+    const name = input.value.trim();
+    const bad = !name ? "Tên thư mục không được để trống."
+      : /[\\/:*?"<>|]/.test(name) || name === "." || name === ".." ? 'Tên không được chứa các ký tự \\ / : * ? " < > |'
+      : name !== value && layout.folders.has(joinPath(parent, name)) ? "Đã có thư mục mang tên này." : null;
+    if (bad) { err.textContent = bad; err.hidden = false; return; }
+    dlg.close();
+    if (name !== value) onSave(name);
+  };
+  $("folder-cancel").onclick = () => dlg.close();
+  dlg.showModal();
+  input.select();
+}
+function newFolder(parent) {
+  folderDialog({ title: "Tạo thư mục", parent, onSave: (name) => {
+    const path = joinPath(parent, name);
+    addFolder(path);
+    activeFolder = path;
+    tCollapsed.delete(parent);
+    changed();
+  } });
+}
+function renameFolder(path) {
+  folderDialog({ title: "Đổi tên thư mục", parent: dirName(path), value: baseName(path), onSave: (name) => {
+    const dest = joinPath(dirName(path), name);
+    const remap = (p) => (p === path ? dest : p.startsWith(path + "/") ? dest + p.slice(path.length) : p);
+    layout.folders = new Set([...layout.folders].map(remap));
+    layout.docs.forEach((f, k) => layout.docs.set(k, remap(f)));
+    activeFolder = remap(activeFolder);
+    changed();
+  } });
 }
 
 function buildTree(items) {
@@ -559,46 +701,116 @@ function buildTree(items) {
   root.children.forEach(squash);
   return root;
 }
-const docsIn = (n) => [...n.docs.map((d) => d.path), ...[...n.children.values()].flatMap(docsIn)];
+const docsIn = (n) => [...n.docs, ...[...n.children.values()].flatMap(docsIn)];
+const byName = (a, b) => a.name.localeCompare(b.name, "vi");
 
 function renderDocs() {
+  renderSource();
+  renderTarget();
+  const sel = placed();
+  $("docs-summary").textContent = docs.length
+    ? `${sel.length}/${docs.length} tài liệu sẽ push · ${formatBytes(sel.reduce((s, d) => s + d.bytes, 0))}` : "";
+}
+
+function renderSource() {
   const q = $("docs-search").value.toLowerCase();
   const shown = docs.filter((d) => (d.path + " " + d.name).toLowerCase().includes(q));
-  const sel = docs.filter((d) => docsSelected.has(d.path));
-  $("docs-summary").textContent = docs.length
-    ? `${sel.length}/${docs.length} tài liệu · ${formatBytes(sel.reduce((s, d) => s + d.bytes, 0))}` : "";
+  const pickedDocs = docs.filter((d) => picked.has(d.path));
+  $("docs-add").disabled = !pickedDocs.length;
+  $("docs-none").hidden = !pickedDocs.length;
+  $("docs-add-text").innerHTML = pickedDocs.length
+    ? `Đưa ${pickedDocs.length} tài liệu vào <b>${esc(activeFolder ? baseName(activeFolder) : rootLabel())}</b>` : "Tick chọn tài liệu để đưa sang GitHub";
   if (!shown.length) {
     $("docs-tree").innerHTML = `<div class="empty-row">${docs.length ? "Không có tài liệu khớp." : "Chưa có tài liệu nào — hãy export ở bước 2."}</div>`;
     return;
   }
   const renderNode = (n) => {
-    const folders = [...n.children.values()].sort((a, b) => a.name.localeCompare(b.name, "vi")).map((c) => {
-      const all = docsIn(c), on = all.filter((p) => docsSelected.has(p)).length;
+    const folders = [...n.children.values()].sort(byName).map((c) => {
+      const all = docsIn(c), on = all.filter((d) => picked.has(d.path)).length, inGh = all.filter((d) => layout.docs.has(d.key)).length;
       const isCollapsed = collapsed.has(c.path) && !q;
       return `<li class="folder${isCollapsed ? " collapsed" : ""}">
-        <div class="row" data-folder="${esc(c.path)}">
+        <div class="row" draggable="true" data-src-folder="${esc(c.path)}" title="Kéo sang cột GitHub để đưa cả thư mục">
           <span class="twisty" data-toggle="${esc(c.path)}">${icon("chevron")}</span>
           <input type="checkbox" data-check-folder="${esc(c.path)}" ${on === all.length ? "checked" : ""} ${on && on < all.length ? 'data-indeterminate="1"' : ""}>
-          ${icon("folder")}<span class="label" title="${esc(c.path)}">${esc(c.name)}</span><span class="meta">${on}/${all.length}</span>
+          ${icon("folder")}<span class="label" title="${esc(c.path)}">${esc(c.name)}</span><span class="meta" title="Số tài liệu đã có bên GitHub">${inGh}/${all.length}</span>
         </div>
         <ul>${renderNode(c)}</ul></li>`;
     }).join("");
-    const files = n.docs.sort((a, b) => a.path.localeCompare(b.path, "vi")).map((d) => `<li>
-        <label class="row"><span class="spacer"></span>
-          <input type="checkbox" data-check-doc="${esc(d.path)}" ${docsSelected.has(d.path) ? "checked" : ""}>
-          ${icon("file")}<span class="label" title="${esc(d.path)}">${esc(docLabel(d))}${d.renamed ? '<span class="renamed-tag">đổi tên</span>' : ""}</span>
+    const files = n.docs.sort((a, b) => a.path.localeCompare(b.path, "vi")).map((d) => {
+      const inGh = layout.docs.has(d.key), isNew = !layout.known.has(d.key);
+      return `<li>
+        <label class="row${inGh ? " in-gh" : ""}" draggable="true" data-src-doc="${esc(d.path)}">
+          <span class="spacer"></span>
+          <input type="checkbox" data-check-doc="${esc(d.path)}" ${picked.has(d.path) ? "checked" : ""}>
+          ${icon("file")}<span class="label" title="${esc(d.path)}">${esc(docLabel(d))}${d.renamed ? '<span class="renamed-tag">đổi tên</span>' : ""}${isNew ? '<span class="new-tag">mới</span>' : ""}</span>
           <span class="row-actions"><button type="button" data-rename="${esc(d.path)}" title="Đổi tên">${icon("edit")}</button><button type="button" class="del" data-delete="${esc(d.path)}" title="Xoá khỏi máy">${icon("trash")}</button></span>
-          <span class="meta">${d.assets ? d.assets + " tệp · " : ""}${formatBytes(d.bytes)}</span>
-        </label></li>`).join("");
+          ${inGh ? `<span class="gh-tag" title="Trên GitHub: ${esc(targetOf(d))}">${icon("check")}GitHub</span>`
+            : `<span class="meta">${formatBytes(d.bytes)}</span>`}
+        </label></li>`;
+    }).join("");
     return folders + files;
   };
-  const tree = buildTree(shown);
-  tree._shown = shown;
-  $("docs-tree").innerHTML = `<ul>${renderNode(tree)}</ul>`;
+  $("docs-tree").innerHTML = `<ul>${renderNode(buildTree(shown))}</ul>`;
   $("docs-tree").querySelectorAll("[data-indeterminate]").forEach((el) => (el.indeterminate = true));
-  $("docs-tree")._tree = tree;
 }
 
+function rootLabel() {
+  return joinPath(val("repo") ? val("repo").split("/").pop() : "repo", val("subdir"));
+}
+
+function renderTarget() {
+  $("tb-repo").textContent = val("repo") ? val("repo").split("/").pop() : "repo";
+  const bad = conflicts();
+  const root = { name: "", path: "", children: new Map(), docs: [] };
+  const node = (path) => {
+    let n = root;
+    path.split("/").filter(Boolean).forEach((part, i, arr) => {
+      if (!n.children.has(part)) n.children.set(part, { name: part, path: arr.slice(0, i + 1).join("/"), children: new Map(), docs: [] });
+      n = n.children.get(part);
+    });
+    return n;
+  };
+  [...layout.folders].forEach(node);
+  placed().forEach((d) => node(layout.docs.get(d.key)).docs.push(d));
+  const count = (n) => n.docs.length + [...n.children.values()].reduce((s, c) => s + count(c), 0);
+  const renderNode = (n) => [...n.children.values()].sort(byName).map((c) => {
+    const isCollapsed = tCollapsed.has(c.path);
+    return `<li class="folder${isCollapsed ? " collapsed" : ""}">
+      <div class="row t-folder${activeFolder === c.path ? " active" : ""}" draggable="true" data-drop="${esc(c.path)}" data-t-folder="${esc(c.path)}">
+        <span class="twisty" data-t-toggle="${esc(c.path)}">${icon("chevron")}</span>
+        ${icon("folder")}<span class="label" title="${esc(c.path)}">${esc(c.name)}</span>
+        <span class="row-actions">
+          <button type="button" data-t-new="${esc(c.path)}" title="Tạo thư mục con">${icon("plus")}</button>
+          <button type="button" data-t-rename="${esc(c.path)}" title="Đổi tên thư mục">${icon("edit")}</button>
+          <button type="button" class="del" data-t-delete="${esc(c.path)}" title="Xoá thư mục">${icon("trash")}</button></span>
+        <span class="meta">${count(c) || ""}</span>
+      </div>
+      <ul>${renderNode(c)}</ul></li>`;
+  }).join("") + n.docs.sort(byName).map((d) => {
+    const clash = bad.has(targetOf(d).toLowerCase());
+    return `<li><div class="row t-doc${clash ? " clash" : ""}" draggable="true" data-t-doc="${esc(d.key)}" data-drop="${esc(n.path)}">
+      <span class="spacer"></span>${icon(clash ? "alert" : "file")}<span class="label" title="${esc(targetOf(d))}">${esc(d.name)}</span>
+      <span class="row-actions"><button type="button" data-rename="${esc(d.path)}" title="Đổi tên">${icon("edit")}</button><button type="button" class="del" data-t-remove="${esc(d.key)}" title="Bỏ khỏi GitHub">${icon("x")}</button></span>
+      ${d.assets ? `<span class="meta">${d.assets} tệp</span>` : ""}</div></li>`;
+  }).join("");
+  const body = renderNode(root);
+  $("target-tree").innerHTML = `<div class="row t-root${activeFolder === "" ? " active" : ""}" data-drop="" data-t-folder="">
+      <svg class="gh-mark" viewBox="0 0 16 16"><use href="#i-github"/></svg><span class="label">${esc(rootLabel())}</span>
+      <span class="row-actions"><button type="button" data-t-new="" title="Tạo thư mục">${icon("plus")}</button></span>
+      <span class="meta">${placed().length || ""}</span></div>
+    <ul>${body}</ul>${body ? "" : `<div class="empty-row drop-hint">Kéo tài liệu từ cột Confluence thả vào đây,<br>hoặc bấm <b>+ Thư mục</b> để tạo cấu trúc trước.</div>`}`;
+  $("target-note").innerHTML = bad.size
+    ? `<span class="err-text">${icon("alert")}Có tài liệu trùng tên trong cùng thư mục — hãy đổi tên hoặc chuyển sang thư mục khác.</span>`
+    : placed().length ? `Bấm vào thư mục để chọn nơi đặt · kéo thả để di chuyển · thả tài liệu về cột Confluence để bỏ khỏi GitHub.` : "";
+  const fresh = docs.filter((d) => !layout.known.has(d.key));
+  $("new-docs").hidden = !fresh.length;
+  if (fresh.length) {
+    $("new-docs").innerHTML = `${icon("info")}<span><b>${fresh.length} tài liệu mới</b> từ Confluence chưa được xếp vào GitHub.</span>
+      <button type="button" class="ghost small" data-new="auto">Tự động xếp</button><button type="button" class="ghost small" data-new="skip">Để sau</button>`;
+  }
+}
+
+// -- thao tác cột Confluence
 $("docs-tree").addEventListener("click", (ev) => {
   const action = ev.target.closest("[data-rename],[data-delete]");
   if (action) {
@@ -611,35 +823,139 @@ $("docs-tree").addEventListener("click", (ev) => {
   if (toggle) {
     const p = toggle.dataset.toggle;
     collapsed.has(p) ? collapsed.delete(p) : collapsed.add(p);
-    renderDocs();
+    renderSource();
     return;
   }
-  const row = ev.target.closest(".row[data-folder]");
+  const row = ev.target.closest(".row[data-src-folder]");
   if (row && !ev.target.matches("input")) row.querySelector("input").click();
 });
 $("docs-tree").addEventListener("change", (ev) => {
   const el = ev.target;
   if (el.dataset.checkDoc) {
-    el.checked ? docsSelected.add(el.dataset.checkDoc) : docsSelected.delete(el.dataset.checkDoc);
+    el.checked ? picked.add(el.dataset.checkDoc) : picked.delete(el.dataset.checkDoc);
   } else if (el.dataset.checkFolder) {
     const prefix = el.dataset.checkFolder + "/";
     const q = $("docs-search").value.toLowerCase();
     docs.filter((d) => d.path.startsWith(prefix) && d.path.toLowerCase().includes(q))
-      .forEach((d) => (el.checked ? docsSelected.add(d.path) : docsSelected.delete(d.path)));
+      .forEach((d) => (el.checked ? picked.add(d.path) : picked.delete(d.path)));
   }
-  renderDocs();
+  renderSource();
 });
-$("docs-search").addEventListener("input", renderDocs);
+$("docs-search").addEventListener("input", renderSource);
 $("docs-reload").addEventListener("click", () => loadDocs(true));
-$("docs-all").addEventListener("click", () => {
-  const q = $("docs-search").value.toLowerCase();
-  docs.filter((d) => d.path.toLowerCase().includes(q)).forEach((d) => docsSelected.add(d.path));
-  renderDocs();
+$("docs-none").addEventListener("click", () => { picked.clear(); renderSource(); });
+$("docs-add").addEventListener("click", () => {
+  const list = docs.filter((d) => picked.has(d.path));
+  placeDocs(list, activeFolder);
+  picked.clear();
+  renderSource();
+  toast(`Đã đưa ${list.length} tài liệu vào <b>${esc(activeFolder || rootLabel())}</b>.`, "ok");
 });
-$("docs-none").addEventListener("click", () => {
-  const q = $("docs-search").value.toLowerCase();
-  docs.filter((d) => d.path.toLowerCase().includes(q)).forEach((d) => docsSelected.delete(d.path));
-  renderDocs();
+
+// -- thao tác cột GitHub
+$("target-tree").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (b) {
+    ev.stopPropagation();
+    const d = b.dataset;
+    if ("tNew" in d) newFolder(d.tNew);
+    else if (d.tRename) renameFolder(d.tRename);
+    else if (d.tDelete) deleteFolder(d.tDelete);
+    else if (d.tRemove) { layout.docs.delete(d.tRemove); changed(); }
+    else if (d.rename) { const doc = docs.find((x) => x.path === d.rename); if (doc) renameDoc(doc); }
+    return;
+  }
+  const toggle = ev.target.closest("[data-t-toggle]");
+  if (toggle) {
+    const p = toggle.dataset.tToggle;
+    tCollapsed.has(p) ? tCollapsed.delete(p) : tCollapsed.add(p);
+    renderTarget();
+    return;
+  }
+  const folder = ev.target.closest("[data-t-folder]");
+  if (folder) { activeFolder = folder.dataset.tFolder; renderDocs(); }
+});
+$("tree-new-folder").addEventListener("click", () => newFolder(activeFolder));
+$("tree-auto").addEventListener("click", () => {
+  const list = docs.filter((d) => !layout.docs.has(d.key));
+  if (!list.length) { toast("Mọi tài liệu đã nằm bên cột GitHub.", "info"); return; }
+  autoPlace(list);
+  changed();
+  toast(`Đã tự động xếp ${list.length} tài liệu.`, "ok");
+});
+$("tree-clear").addEventListener("click", () => {
+  if (!layout.docs.size && !layout.folders.size) return;
+  if (!confirm("Làm trống cột GitHub? Mọi thư mục và vị trí tài liệu đã sắp cho repo này sẽ bị xoá (file trên GitHub không bị ảnh hưởng).")) return;
+  layout.folders.clear();
+  layout.docs.clear();
+  activeFolder = "";
+  changed();
+});
+$("new-docs").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-new]");
+  if (!b) return;
+  const fresh = docs.filter((d) => !layout.known.has(d.key));
+  if (b.dataset.new === "auto") autoPlace(fresh);
+  else fresh.forEach((d) => layout.known.add(d.key));
+  changed();
+});
+
+// -- kéo thả
+document.addEventListener("dragstart", (ev) => {
+  const el = ev.target.closest?.("[draggable]");
+  if (!el) return;
+  const d = el.dataset;
+  if (d.srcDoc) {
+    // Kéo một tài liệu đang được tick → kéo cả nhóm đã tick.
+    const list = picked.has(d.srcDoc) ? docs.filter((x) => picked.has(x.path)) : docs.filter((x) => x.path === d.srcDoc);
+    dragging = { kind: "docs", list };
+  } else if (d.srcFolder) dragging = { kind: "src-folder", path: d.srcFolder };
+  else if (d.tDoc) dragging = { kind: "docs", list: docs.filter((x) => x.key === d.tDoc), fromTarget: true };
+  else if (d.tFolder) dragging = { kind: "t-folder", path: d.tFolder };
+  else return;
+  ev.dataTransfer.effectAllowed = "move";
+  ev.dataTransfer.setData("text/plain", "");
+  if (dragging.kind === "docs" && dragging.list.length > 1) {
+    const ghost = Object.assign(document.createElement("div"), { className: "drag-ghost", textContent: `${dragging.list.length} tài liệu` });
+    document.body.appendChild(ghost);
+    ev.dataTransfer.setDragImage(ghost, 10, 10);
+    setTimeout(() => ghost.remove());
+  }
+});
+document.addEventListener("dragend", () => {
+  dragging = null;
+  document.querySelectorAll(".drop-over").forEach((x) => x.classList.remove("drop-over"));
+});
+function dropZone(ev) {
+  if (!dragging) return null;
+  if (ev.target.closest("#docs-tree")) return dragging.fromTarget ? $("docs-tree") : null;
+  if (!ev.target.closest("#target-tree")) return null;
+  return ev.target.closest("[data-drop]") || $("target-tree");
+}
+document.addEventListener("dragover", (ev) => {
+  const zone = dropZone(ev);
+  document.querySelectorAll(".drop-over").forEach((x) => x !== zone && x.classList.remove("drop-over"));
+  if (!zone) return;
+  ev.preventDefault();
+  zone.classList.add("drop-over");
+});
+document.addEventListener("drop", (ev) => {
+  const zone = dropZone(ev);
+  if (!zone) return;
+  ev.preventDefault();
+  zone.classList.remove("drop-over");
+  const drag = dragging;
+  dragging = null;
+  if (zone === $("docs-tree")) {
+    drag.list.forEach((d) => layout.docs.delete(d.key));
+    changed();
+    return;
+  }
+  const folder = zone.dataset.drop ?? "";
+  if (drag.kind === "docs") placeDocs(drag.list, folder);
+  else if (drag.kind === "src-folder") toast(`Đã đưa ${placeSourceFolder(drag.path, folder)} tài liệu vào <b>${esc(joinPath(folder, baseName(drag.path)))}</b>.`, "ok");
+  else if (drag.kind === "t-folder") moveFolder(drag.path, folder);
+  tCollapsed.delete(folder);
 });
 
 function confirmPublic() {
@@ -657,7 +973,8 @@ $("btn-push").addEventListener("click", async () => {
   if (!ghStatus?.logged_in) { toast("Hãy đăng nhập GitHub trước.", "err"); return; }
   if (!selectedRepo) { toast("Hãy chọn một repository.", "err"); $("repo-search").focus(); return; }
   if (!val("output")) { toast("Chưa có thư mục kết quả. Hãy export ở bước 2.", "err"); goto("export"); return; }
-  if (!docsSelected.size) { toast("Hãy chọn ít nhất một tài liệu để push.", "err"); return; }
+  if (!placed().length) { toast("Hãy kéo ít nhất một tài liệu sang cột GitHub để push.", "err"); return; }
+  if (conflicts().size) { toast("Có tài liệu trùng tên trong cùng thư mục bên cột GitHub — hãy xử lý trước khi push.", "err"); return; }
   if (!selectedRepo.private && !(await confirmPublic())) return;
   const btn = $("btn-push");
   busy(btn, true);
@@ -667,7 +984,7 @@ $("btn-push").addEventListener("click", async () => {
     await api("/api/push", {
       repo: selectedRepo.full_name, branch: val("branch"), subdir: val("subdir"),
       message: val("message"), output: val("output"), allow_public: !selectedRepo.private,
-      docs: [...docsSelected],
+      layout: Object.fromEntries(placed().map((d) => [d.path, layout.docs.get(d.key)])),
     });
     startPolling("push");
   } catch (e) {

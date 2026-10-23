@@ -344,3 +344,52 @@ dialog button:focus:not(:focus-visible) { outline: none; }
 .docs-tree .row-actions button:hover { background: var(--surface); }
 .docs-tree .row-actions button.del { color: var(--err); }
 .docs-tree .row-actions svg { width: 15px; height: 15px; color: inherit; }
+
+/* step 5 – sắp xếp tài liệu (Confluence → GitHub) */
+.panel.github-panel { max-width: 1120px; }
+.arrange { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0 10px; }
+.pane { display: flex; flex-direction: column; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fbfeff; }
+.pane-head { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-bottom: 8px; font-size: 14px; }
+.pane-head > svg { color: var(--curious); width: 17px; height: 17px; }
+.pane-head .hint { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pane-actions { display: inline-flex; gap: 2px; }
+.pane-search { margin-bottom: 8px; }
+.pane-search input { padding-top: 8px; padding-bottom: 8px; }
+.pane .docs-tree { flex: 1; margin: 0; min-height: 300px; max-height: 460px; background: var(--milk); }
+.pane-foot { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.pane-foot .secondary { min-width: 0; overflow: hidden; }
+.pane-foot .secondary span { overflow: hidden; text-overflow: ellipsis; }
+.pane-note { margin-top: 8px; min-height: 18px; font-size: 12.5px; }
+.err-text { display: inline-flex; gap: 6px; align-items: center; color: var(--err); }
+.err-text svg { width: 15px; height: 15px; }
+.docs-tree .row[draggable="true"] { cursor: grab; }
+.docs-tree .row.in-gh .label { color: var(--muted); }
+.gh-tag { margin-left: auto; display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: 6px;
+  background: var(--ok-soft); color: var(--ok); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
+.docs-tree .row .gh-tag svg { width: 12px; height: 12px; color: var(--ok); }
+.new-tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 6px; font-size: 11px; font-weight: 500; background: var(--soft); color: var(--yale); vertical-align: 1px; }
+.target-tree .t-root { font-weight: 600; }
+.target-tree .t-root svg { color: var(--whale); }
+.target-tree .row.active { background: var(--soft); box-shadow: inset 3px 0 0 var(--curious); }
+.target-tree .row.clash { background: var(--err-soft); }
+.target-tree .row.clash svg { color: var(--err); }
+.docs-tree .drop-over, .docs-tree.drop-over { background: rgba(34, 152, 213, .14) !important; outline: 2px dashed var(--curious); outline-offset: -2px; }
+.drop-hint { margin-top: 30px; line-height: 1.7; }
+.new-docs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; padding: 8px 10px; border-radius: 10px;
+  background: var(--warn-soft); font-size: 13px; }
+.new-docs > svg { color: var(--warn); width: 16px; height: 16px; }
+.new-docs span { flex: 1; min-width: 160px; }
+.drag-ghost { position: fixed; top: -100px; left: 0; padding: 6px 12px; border-radius: 8px; background: var(--curious); color: #fff;
+  font: 500 13px var(--body); }
+@media (max-width: 900px) { .arrange { grid-template-columns: 1fr; } }
+.target-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.tb-field { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 4px 0 10px; border: 1px solid #d5e6ee; border-radius: 9px;
+  background: var(--milk); font: 400 13px var(--body); color: var(--muted); cursor: text; transition: border-color .15s, box-shadow .15s; }
+.tb-field:focus-within { border-color: var(--curious); box-shadow: 0 0 0 3px rgba(34, 152, 213, .18); }
+.tb-field.grow { flex: 1; min-width: 200px; }
+.tb-field > span { white-space: nowrap; }
+.tb-field #tb-repo { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.tb-slash { color: var(--granite); }
+.tb-field input { border: none; box-shadow: none !important; padding: 7px 4px; background: transparent; font-size: 13.5px; min-width: 0; }
+.tb-field:first-child input { width: 90px; }
+.commit-field { margin-top: 4px; max-width: 520px; }

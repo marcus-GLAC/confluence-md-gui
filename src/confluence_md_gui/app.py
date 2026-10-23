@@ -483,19 +483,23 @@ def create_repo(token: str, name: str, private: bool) -> dict:
 MD_LINK = re.compile(r"!?\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
 
 
-def confluence_page_urls(output: Path) -> dict[str, str]:
-    """Đọc confluence-lock.json (cme tạo khi export) → {đường dẫn .md: link trang Confluence gốc}."""
+def lock_pages(output: Path):
+    """Duyệt confluence-lock.json (cme tạo khi export) → (base_url, space, page_id, export_path)."""
     try:
         lock = json.loads((output / "confluence-lock.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    urls = {}
+        return
     for base, org in (lock.get("orgs") or {}).items():
         for space, sp in (org.get("spaces") or {}).items():
             for page_id, page in (sp.get("pages") or {}).items():
                 if page.get("export_path"):
-                    urls[page["export_path"]] = f"{base.rstrip('/')}/wiki/spaces/{space}/pages/{page_id}"
-    return urls
+                    yield base, space, page_id, page["export_path"]
+
+
+def confluence_page_urls(output: Path) -> dict[str, str]:
+    """{đường dẫn .md: link trang Confluence gốc}."""
+    return {path: f"{base.rstrip('/')}/wiki/spaces/{space}/pages/{page_id}"
+            for base, space, page_id, path in lock_pages(output)}
 
 
 def format_size(n: int) -> str:
@@ -546,14 +550,64 @@ def push_name(rel: str, renames: dict[str, str]) -> str:
 
 def list_documents(output: Path) -> list[dict]:
     renames = load_meta(output)["renames"]
+    # Khoá ổn định của tài liệu = page ID Confluence, để cấu trúc GitHub vẫn đúng khi trang đổi tên/chuyển chỗ.
+    ids = {path: page_id for _, _, page_id, path in lock_pages(output)}
     docs = []
     for rel in list_markdown(output):
         md = output / rel
         refs = local_refs(output, rel, md.read_text(encoding="utf-8", errors="replace"))
         size = md.stat().st_size + sum((output / r).stat().st_size for r in refs)
-        docs.append({"path": rel, "name": renames.get(rel, os.path.basename(rel)), "renamed": rel in renames,
-                     "assets": len(refs), "bytes": size})
+        docs.append({"path": rel, "key": ids.get(rel, rel), "name": renames.get(rel, os.path.basename(rel)),
+                     "renamed": rel in renames, "assets": len(refs), "bytes": size})
     return docs
+
+
+def clean_folder(folder: str) -> str:
+    """Kiểm tra đường dẫn thư mục ảo do người dùng đặt ("a/b/c"; "" = gốc)."""
+    parts = [x.strip() for x in str(folder).replace("\\", "/").split("/") if x.strip()]
+    for part in parts:
+        if BAD_NAME.search(part) or part in (".", ".."):
+            raise ValueError(f'Tên thư mục "{part}" không hợp lệ (không được chứa \\ / : * ? " < > |).')
+    return "/".join(parts)
+
+
+def load_layout(output: Path, repo: str) -> dict | None:
+    """Cấu trúc thư mục ảo người dùng đã sắp cho một repo; None nếu chưa có."""
+    return load_meta(output).get("layouts", {}).get(repo or "")
+
+
+def save_layout(output: Path, repo: str, layout: dict) -> dict:
+    folders = sorted({clean_folder(f) for f in layout.get("folders", [])} - {""})
+    # Thư mục cha của mọi thư mục/tài liệu cũng phải tồn tại.
+    docs = {str(k): clean_folder(v) for k, v in (layout.get("docs") or {}).items()}
+    for f in [*folders, *docs.values()]:
+        while f:
+            if f not in folders:
+                folders.append(f)
+            f = os.path.dirname(f)
+    clean = {"folders": sorted(set(folders)), "docs": docs, "known": sorted({str(k) for k in layout.get("known", [])})}
+    meta = load_meta(output)
+    meta.setdefault("layouts", {})[repo or ""] = clean
+    save_meta(output, meta)
+    return clean
+
+
+ASSETS_DIR = "assets"
+
+
+def push_targets(md_files: dict[str, str], assets: set[str]) -> dict[str, str]:
+    """Đường dẫn trên GitHub cho từng file: .md theo cấu trúc ảo, ảnh/đính kèm gom vào assets/."""
+    targets = dict(md_files)
+    taken = {t.lower() for t in targets.values()}
+    for rel in sorted(assets):
+        stem, ext = os.path.splitext(os.path.basename(rel))
+        path, n = f"{ASSETS_DIR}/{stem}{ext}", 1
+        while path.lower() in taken:
+            n += 1
+            path = f"{ASSETS_DIR}/{stem}-{n}{ext}"
+        taken.add(path.lower())
+        targets[rel] = path
+    return targets
 
 
 def rename_document(output: Path, rel: str, name: str) -> dict:
@@ -607,14 +661,25 @@ def delete_document(output: Path, rel: str) -> dict:
 
 
 def rewrite_for_push(text: str, md_rel: str, skipped: dict[str, int], page_urls: dict[str, str],
-                     selected: set[str], renames: dict[str, str] | None = None) -> tuple[str, int, int]:
+                     selected: set[str], targets: dict[str, str]) -> tuple[str, int, int]:
     """Sửa nội dung .md trước khi đẩy lên GitHub.
 
     - Link tới file bị bỏ qua (quá lớn) → dòng ghi chú dẫn về trang Confluence gốc.
     - Link tới tài liệu không được chọn → trỏ về trang Confluence của tài liệu đó (tránh link hỏng).
+    - Link tới file được đưa lên → tính lại theo vị trí mới trên GitHub (targets).
     """
     notes = relinks = 0
     page_url = page_urls.get(md_rel)
+    here = os.path.dirname(targets.get(md_rel, md_rel)) or "."
+
+    def moved(href: str) -> str | None:
+        target = link_target(md_rel, href)
+        if not target or target not in targets:
+            return None
+        if targets[target] == target and targets.get(md_rel, md_rel) == md_rel:
+            return None
+        anchor = "#" + href.split("#", 1)[1] if "#" in href else ""
+        return urllib.parse.quote(os.path.relpath(targets[target], here).replace("\\", "/")) + anchor
 
     def sub(match: re.Match) -> str:
         nonlocal notes, relinks
@@ -625,15 +690,25 @@ def rewrite_for_push(text: str, md_rel: str, skipped: dict[str, int], page_urls:
             where = f"[trang gốc trên Confluence]({page_url})" if page_url else "trang gốc trên Confluence"
             return (f"📎 *Tệp đính kèm **{name}** ({format_size(skipped[target])}) quá lớn nên không được đưa lên "
                     f"GitHub — xem tệp này tại {where}.*")
-        if target and target.endswith(".md") and target not in selected and target in page_urls:
-            relinks += 1
-            return f"[{match.group(1)}]({page_urls[target]})"
-        if target and renames and target in renames and target in selected:
-            new = os.path.relpath(push_name(target, renames), os.path.dirname(md_rel) or ".").replace("\\", "/")
-            return f"[{match.group(1)}]({urllib.parse.quote(new)})"
+        if target and target.endswith(".md") and target not in selected:
+            if target in page_urls:
+                relinks += 1
+                return f"[{match.group(1)}]({page_urls[target]})"
+            # Trang không được export (vd. breadcrumb tới trang cha) → giữ chữ, bỏ link hỏng.
+            return match.group(1)
+        new = moved(match.group(2))
+        if new:
+            bang = "!" if match.group(0).startswith("!") else ""
+            return f"{bang}[{match.group(1)}]({new})"
         return match.group(0)
 
-    return MD_LINK.sub(sub, text), notes, relinks
+    def sub_img(match: re.Match) -> str:
+        new = moved(html.unescape(match.group(2)))
+        return f"{match.group(1)}{html.escape(new)}{match.group(3)}" if new else match.group(0)
+
+    text = MD_LINK.sub(sub, text)
+    text = re.sub(r"(<img[^>]+src=[\"'])([^\"']+)([\"'])", sub_img, text, flags=re.I)
+    return text, notes, relinks
 
 
 def git_blob_sha(data: bytes) -> str:
@@ -680,17 +755,35 @@ def run_push(job: Job, p: dict) -> bool:
     }
 
     all_docs = list_markdown(output)
-    selected = set(all_docs) if p.get("docs") is None else set(p["docs"]) & set(all_docs)
+    renames = load_meta(output)["renames"]
+    # layout = {tài liệu: thư mục ảo trên GitHub}; không có thì giữ nguyên cấu trúc export như trước.
+    layout = p.get("layout")
+    if layout is not None:
+        layout = {rel: clean_folder(folder) for rel, folder in layout.items() if rel in all_docs}
+        selected = set(layout)
+    else:
+        selected = set(all_docs) if p.get("docs") is None else set(p["docs"]) & set(all_docs)
     if not selected:
         raise ValueError("Chưa chọn tài liệu nào để push.")
-    wanted = set(selected)
+    assets = set()
     for rel in selected:
-        wanted |= local_refs(output, rel, (output / rel).read_text(encoding="utf-8", errors="replace"))
+        assets |= local_refs(output, rel, (output / rel).read_text(encoding="utf-8", errors="replace"))
+    wanted = selected | assets
+    if layout is not None:
+        md_targets = {rel: f"{folder}/{renames.get(rel, os.path.basename(rel))}".lstrip("/")
+                      for rel, folder in layout.items()}
+        seen: dict[str, str] = {}
+        for rel, target in md_targets.items():
+            if target.lower() in seen:
+                raise ValueError(f"Hai tài liệu cùng nằm ở {target} — hãy đổi tên hoặc chuyển một tài liệu sang thư mục khác.")
+            seen[target.lower()] = rel
+        targets = push_targets(md_targets, assets)
+    else:
+        targets = {rel: push_name(rel, renames) for rel in wanted}
     # File .md xử lý sau cùng để biết hết file nào bị bỏ qua mà sửa link trong đó.
     files = sorted((output / rel for rel in wanted), key=lambda f: (f.suffix.lower() == ".md", str(f)))
     skipped: dict[str, int] = {}
     page_urls = confluence_page_urls(output)
-    renames = load_meta(output)["renames"]
     entries, notes, relinks = [], 0, 0
     job.log(f"  {len(selected)}/{len(all_docs)} tài liệu được chọn · {len(files)} file (kèm ảnh, đính kèm)")
     for i, f in enumerate(files, 1):
@@ -698,7 +791,7 @@ def run_push(job: Job, p: dict) -> bool:
             job.log("⏹ Đã dừng.")
             return False
         rel = f.relative_to(output).as_posix()
-        path = f"{subdir}/{push_name(rel, renames)}" if subdir else push_name(rel, renames)
+        path = f"{subdir}/{targets[rel]}" if subdir else targets[rel]
         size = f.stat().st_size
         if size > GITHUB_MAX_FILE:
             skipped[rel] = size
@@ -706,7 +799,7 @@ def run_push(job: Job, p: dict) -> bool:
         data = f.read_bytes()
         if f.suffix.lower() == ".md":
             original = data.decode("utf-8", errors="replace")
-            text, n, r = rewrite_for_push(original, rel, skipped, page_urls, selected, renames)
+            text, n, r = rewrite_for_push(original, rel, skipped, page_urls, selected, targets)
             if text != original:
                 data, notes, relinks = text.encode("utf-8"), notes + n, relinks + r
         if remote.get(path) == git_blob_sha(data):
@@ -826,6 +919,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "lines": job.lines[since:], "total": len(job.lines)})
             if url.path == "/api/docs":
                 return self._json({"docs": list_documents(Path(q["output"]).expanduser())})
+            if url.path == "/api/layout":
+                return self._json({"layout": load_layout(Path(q["output"]).expanduser(), q.get("repo", ""))})
             if url.path == "/api/tree":
                 return self._json({"files": list_markdown(Path(q["output"]).expanduser())})
             if url.path == "/api/preview":
@@ -871,6 +966,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if path == "/api/doc/rename":
                 return self._json(rename_document(Path(p["output"]).expanduser(), p["path"], p["name"]))
+            if path == "/api/layout":
+                return self._json({"layout": save_layout(Path(p["output"]).expanduser(), p.get("repo", ""), p["layout"])})
             if path == "/api/doc/delete":
                 if Job.current and Job.current.running:
                     raise ValueError("Đang có tác vụ chạy, vui lòng đợi xong rồi xoá.")

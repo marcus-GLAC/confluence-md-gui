@@ -202,7 +202,7 @@
     </section>
 
     <!-- 5. GitHub -->
-    <section class="panel" id="step-github">
+    <section class="panel github-panel" id="step-github">
       <div class="panel-head">
         <span class="eyebrow">Bước 5 / 5</span>
         <h1>Đưa lên GitHub</h1>
@@ -258,40 +258,50 @@
         <ul id="repo-list" class="repo-list"></ul>
         <input type="hidden" id="repo">
 
-        <details class="advanced">
-          <summary><svg class="chev"><use href="#i-chevron"/></svg>Tuỳ chọn nâng cao</summary>
-          <div class="form-grid">
-            <div class="field">
-              <label for="branch">Nhánh</label>
-              <input id="branch" placeholder="main">
-            </div>
-            <div class="field">
-              <label for="subdir">Thư mục trong repo <span class="opt">(tuỳ chọn)</span></label>
-              <input id="subdir" placeholder="docs">
-            </div>
-            <div class="field full">
-              <label for="message">Nội dung commit</label>
-              <input id="message" placeholder="Cập nhật tài liệu từ Confluence">
-            </div>
-          </div>
-        </details>
       </div>
 
       <!-- Tài liệu -->
       <div class="card" id="gh-docs-card">
-        <div class="card-title"><span class="num-badge">3</span>Chọn tài liệu
+        <div class="card-title"><span class="num-badge">3</span>Sắp xếp tài liệu trên GitHub
           <span class="hint push-right" id="docs-summary"></span></div>
-        <div class="docs-toolbar">
-          <div class="input-group">
-            <span class="input-icon"><svg><use href="#i-search"/></svg></span>
-            <input id="docs-search" placeholder="Tìm tài liệu…" autocomplete="off">
+        <p class="hint">Kéo tài liệu (hoặc cả thư mục) từ cột <b>Confluence</b> thả vào thư mục bên cột <b>GitHub</b>. Chỉ tài liệu nằm bên cột GitHub mới được push, đúng theo cấu trúc bạn sắp.</p>
+        <div class="arrange">
+          <div class="pane">
+            <div class="pane-head"><svg><use href="#i-download"/></svg><b>Confluence</b><span class="hint">tài liệu đã export</span>
+              <button type="button" class="ghost icon-only push-right" id="docs-reload" title="Tải lại"><svg><use href="#i-refresh"/></svg></button></div>
+            <div class="input-group pane-search">
+              <span class="input-icon"><svg><use href="#i-search"/></svg></span>
+              <input id="docs-search" placeholder="Tìm tài liệu…" autocomplete="off">
+            </div>
+            <div id="docs-tree" class="docs-tree"></div>
+            <div class="pane-foot">
+              <button type="button" class="secondary small" id="docs-add" disabled><svg><use href="#i-arrow"/></svg><span id="docs-add-text">Chọn tài liệu để đưa sang GitHub</span></button>
+              <button type="button" class="ghost small" id="docs-none" hidden>Bỏ chọn</button>
+            </div>
           </div>
-          <button type="button" class="ghost small" id="docs-all">Chọn tất cả</button>
-          <button type="button" class="ghost small" id="docs-none">Bỏ chọn</button>
-          <button type="button" class="ghost icon-only" id="docs-reload" title="Tải lại"><svg><use href="#i-refresh"/></svg></button>
+          <div class="pane">
+            <div class="pane-head"><svg class="gh-mark" viewBox="0 0 16 16"><use href="#i-github"/></svg><b>GitHub</b><span class="hint">cấu trúc sẽ push</span>
+              <span class="push-right pane-actions">
+                <button type="button" class="ghost small" id="tree-new-folder" title="Tạo thư mục trong thư mục đang chọn"><svg><use href="#i-plus"/></svg>Thư mục</button>
+                <button type="button" class="ghost small" id="tree-auto" title="Xếp các tài liệu chưa có bên GitHub theo cấu trúc Confluence (bỏ phần thư mục chung)">Tự động xếp</button>
+                <button type="button" class="ghost icon-only" id="tree-clear" title="Làm trống cột GitHub"><svg><use href="#i-trash"/></svg></button>
+              </span></div>
+            <div class="target-bar">
+              <label class="tb-field" title="Nhánh sẽ nhận commit (chưa có sẽ được tạo mới)"><span>Nhánh</span>
+                <input id="branch" placeholder="main" autocomplete="off"></label>
+              <label class="tb-field grow" title="Toàn bộ cấu trúc bên dưới sẽ nằm trong thư mục này của repo. Để trống = gốc repo."><span id="tb-repo">repo</span><span class="tb-slash">/</span>
+                <input id="subdir" placeholder="thư mục gốc (tuỳ chọn)" autocomplete="off"></label>
+            </div>
+            <div id="new-docs" class="new-docs" hidden></div>
+            <div id="target-tree" class="docs-tree target-tree"></div>
+            <p class="hint pane-note" id="target-note"></p>
+          </div>
         </div>
-        <div id="docs-tree" class="docs-tree"></div>
-        <p class="hint">Ảnh và tệp đính kèm của tài liệu được chọn sẽ tự đi kèm. Link tới tài liệu không được chọn sẽ trỏ về trang Confluence gốc.</p>
+        <div class="field commit-field">
+          <label for="message">Nội dung commit</label>
+          <input id="message" placeholder="Cập nhật tài liệu từ Confluence">
+        </div>
+        <p class="hint">Ảnh và tệp đính kèm tự đi kèm vào thư mục <code>assets/</code>, link trong tài liệu được tự sửa theo vị trí mới. Link tới tài liệu không được push sẽ trỏ về trang Confluence gốc. Cách sắp xếp được ghi nhớ riêng cho từng repo.</p>
       </div>
 
       <div id="push-result" class="card result" hidden>
@@ -355,6 +365,24 @@
       <button type="button" class="ghost" id="rename-reset">Khôi phục tên gốc</button>
       <button type="button" class="secondary" id="rename-cancel">Huỷ</button>
       <button type="submit" class="primary" id="rename-ok">Lưu tên</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="folder-dialog">
+  <form method="dialog" id="folder-form">
+    <div class="dialog-body">
+      <span class="badge-icon info-badge"><svg><use href="#i-folder"/></svg></span>
+      <h3 id="folder-title">Tạo thư mục</h3>
+      <p id="folder-parent"></p>
+      <div class="field" style="margin-top:16px">
+        <input id="folder-input" autocomplete="off" placeholder="Tên thư mục">
+        <p class="hint" id="folder-error" style="color:var(--err)" hidden></p>
+      </div>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="folder-cancel">Huỷ</button>
+      <button type="submit" class="primary" id="folder-ok">Lưu</button>
     </div>
   </form>
 </dialog>
