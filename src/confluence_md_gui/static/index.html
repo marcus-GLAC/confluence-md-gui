@@ -182,12 +182,16 @@
             <input id="filter" placeholder="Tìm file…">
             <button type="button" class="ghost icon-only" id="btn-refresh" title="Tải lại"><svg><use href="#i-refresh"/></svg></button>
           </div>
-          <p class="hint" id="file-count"></p>
+          <div class="zip-bar">
+            <label class="zip-all"><input type="checkbox" id="zip-all"><span id="file-count" class="hint"></span></label>
+            <button type="button" class="ghost small" id="btn-zip" disabled title="Tải các tài liệu đã chọn dưới dạng .zip (kèm ảnh)"><svg><use href="#i-download"/></svg><span id="btn-zip-text">Tải .zip</span></button>
+          </div>
           <ul id="file-list"></ul>
         </aside>
         <div class="preview-main">
           <div id="preview-toolbar" class="preview-toolbar" hidden>
             <div class="pt-name"><b id="pt-title"></b><small id="pt-sub"></small></div>
+            <button type="button" class="ghost small" id="pt-zip" title="Tải tài liệu này kèm ảnh dưới dạng .zip"><svg><use href="#i-download"/></svg>Tải .zip</button>
             <button type="button" class="ghost small" id="pt-rename"><svg><use href="#i-edit"/></svg>Đổi tên</button>
             <button type="button" class="ghost small danger-text" id="pt-delete"><svg><use href="#i-trash"/></svg>Xoá</button>
           </div>

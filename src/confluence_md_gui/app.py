@@ -14,6 +14,7 @@ import base64
 import hashlib
 import html
 import argparse
+import io
 import json
 import os
 import re
@@ -22,10 +23,12 @@ import socket
 import subprocess
 import sys
 import threading
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -711,6 +714,53 @@ def rewrite_for_push(text: str, md_rel: str, skipped: dict[str, int], page_urls:
     return text, notes, relinks
 
 
+def slugify(name: str) -> str:
+    """"Hướng dẫn sử dụng Candy Wiki" → "huong-dan-su-dung-candy-wiki"."""
+    text = unicodedata.normalize("NFKD", name.replace("đ", "d").replace("Đ", "D"))
+    text = "".join(c for c in text if not unicodedata.combining(c)).lower()
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")[:80].strip("-") or "tai-lieu"
+
+
+def unique_path(path: str, taken: set[str]) -> str:
+    stem, ext = os.path.splitext(path)
+    n = 1
+    while path.lower() in taken:
+        n += 1
+        path = f"{stem}-{n}{ext}"
+    taken.add(path.lower())
+    return path
+
+
+def build_zip(output: Path, rels: list[str]) -> tuple[bytes, str]:
+    """Đóng gói các tài liệu được chọn thành file .zip: <tên>.md ở gốc, ảnh trong images/, tệp khác trong attachments/."""
+    all_docs = set(list_markdown(output))
+    selected = [r for r in dict.fromkeys(rels) if r in all_docs]
+    if not selected:
+        raise ValueError("Chưa chọn tài liệu nào để tải về.")
+    renames = load_meta(output)["renames"]
+    taken: set[str] = set()
+    targets = {rel: unique_path(slugify(renames.get(rel, os.path.basename(rel))[:-3]) + ".md", taken)
+               for rel in selected}
+    assets = set()
+    for rel in selected:
+        assets |= local_refs(output, rel, (output / rel).read_text(encoding="utf-8", errors="replace"))
+    for rel in sorted(assets):
+        folder = "images" if os.path.splitext(rel)[1].lower() in IMAGE_EXTS else "attachments"
+        targets[rel] = unique_path(f"{folder}/{os.path.basename(rel)}", taken)
+
+    page_urls = confluence_page_urls(output)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel in selected:
+            text = (output / rel).read_text(encoding="utf-8", errors="replace")
+            text, _, _ = rewrite_for_push(text, rel, {}, page_urls, set(selected), targets)
+            zf.writestr(targets[rel], text.encode("utf-8"))
+        for rel in sorted(assets):
+            zf.write(output / rel, targets[rel])
+    name = targets[selected[0]][:-3] if len(selected) == 1 else f"confluence-export-{len(selected)}-tai-lieu"
+    return buf.getvalue(), name + ".zip"
+
+
 def git_blob_sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
@@ -972,6 +1022,10 @@ class Handler(BaseHTTPRequestHandler):
                 if Job.current and Job.current.running:
                     raise ValueError("Đang có tác vụ chạy, vui lòng đợi xong rồi xoá.")
                 return self._json(delete_document(Path(p["output"]).expanduser(), p["path"]))
+            if path == "/api/zip":
+                data, name = build_zip(Path(p["output"]).expanduser(), list(p.get("paths") or []))
+                disposition = f"attachment; filename=\"{name}\"; filename*=UTF-8''{urllib.parse.quote(name)}"
+                return self._send(200, data, "application/zip", {"Content-Disposition": disposition})
             if path == "/api/check-links":
                 return self._json(check_links(Path(p["output"]).expanduser(), bool(p.get("strip_query"))))
             if path == "/api/confluence-check":

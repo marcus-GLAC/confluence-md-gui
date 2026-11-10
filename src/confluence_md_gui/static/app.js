@@ -271,13 +271,15 @@ function statusBoxHtml(kind, html) {
 }
 
 // ---------------------------------------------------------------- 4. preview
-let files = [], currentDoc = null;
+let files = [], currentDoc = null, zipPicked = new Set();
 const docLabel = (d) => d.name.replace(/\.md$/, "");
 
 async function loadTree() {
   if (!val("output")) return;
   try {
     files = (await api("/api/docs?output=" + encodeURIComponent(val("output")))).docs;
+    const exists = new Set(files.map((d) => d.path));
+    zipPicked.forEach((p) => exists.has(p) || zipPicked.delete(p));
     renderTree();
     if (currentDoc) {
       currentDoc = files.find((d) => d.path === currentDoc.path) || null;
@@ -291,10 +293,47 @@ function renderTree() {
   $("file-count").textContent = files.length ? `${shown.length} / ${files.length} tài liệu` : "";
   $("file-list").innerHTML = shown.length ? shown.map((d) => {
     const i = d.path.lastIndexOf("/"), dir = i > 0 ? d.path.slice(0, i) : "";
-    return `<li data-path="${esc(d.path)}" class="${currentDoc?.path === d.path ? "active" : ""}">${icon("file")}<span class="path">
+    return `<li data-path="${esc(d.path)}" class="${currentDoc?.path === d.path ? "active" : ""}">
+      <input type="checkbox" class="zip-pick" title="Chọn để tải .zip"${zipPicked.has(d.path) ? " checked" : ""}><span class="path">
       <span>${esc(docLabel(d))}${d.renamed ? '<span class="renamed-tag">đổi tên</span>' : ""}</span>${dir ? `<small>${esc(dir)}</small>` : ""}</span></li>`;
   }).join("") : `<li class="hint">${files.length ? "Không có tài liệu khớp." : "Chưa có tài liệu nào."}</li>`;
+  updateZipBar(shown);
 }
+function updateZipBar(shown) {
+  const on = shown.filter((d) => zipPicked.has(d.path)).length;
+  $("zip-all").checked = shown.length > 0 && on === shown.length;
+  $("zip-all").indeterminate = on > 0 && on < shown.length;
+  $("zip-all").disabled = !shown.length;
+  $("btn-zip").disabled = !zipPicked.size;
+  $("btn-zip-text").textContent = zipPicked.size ? `Tải .zip (${zipPicked.size})` : "Tải .zip";
+}
+const shownFiles = () => files.filter((d) => (d.path + " " + d.name).toLowerCase().includes($("filter").value.toLowerCase()));
+
+async function downloadZip(paths, btn) {
+  busy(btn, true);
+  try {
+    const res = await fetch("/api/zip", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ output: val("output"), paths }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+    const name = m ? decodeURIComponent(m[1]) : "confluence-export.zip";
+    const url = URL.createObjectURL(await res.blob());
+    const a = Object.assign(document.createElement("a"), { href: url, download: name });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    toast(`Đã tải <b>${esc(name)}</b> (${paths.length} tài liệu).`, "ok");
+  } catch (e) { toast(esc(e.message), "err"); }
+  finally { busy(btn, false); }
+}
+$("zip-all").addEventListener("change", (ev) => {
+  shownFiles().forEach((d) => (ev.target.checked ? zipPicked.add(d.path) : zipPicked.delete(d.path)));
+  renderTree();
+});
+$("btn-zip").addEventListener("click", () => downloadZip([...zipPicked], $("btn-zip")));
+$("pt-zip").addEventListener("click", () => currentDoc && downloadZip([currentDoc.path], $("pt-zip")));
 function clearPreview() {
   currentDoc = null;
   $("preview-toolbar").hidden = true;
@@ -310,6 +349,10 @@ $("btn-refresh").addEventListener("click", loadTree);
 $("file-list").addEventListener("click", async (ev) => {
   const li = ev.target.closest("li[data-path]");
   if (!li) return;
+  if (ev.target.classList.contains("zip-pick")) {
+    ev.target.checked ? zipPicked.add(li.dataset.path) : zipPicked.delete(li.dataset.path);
+    return updateZipBar(shownFiles());
+  }
   currentDoc = files.find((d) => d.path === li.dataset.path);
   document.querySelectorAll("#file-list li").forEach((x) => x.classList.toggle("active", x === li));
   updatePreviewToolbar();

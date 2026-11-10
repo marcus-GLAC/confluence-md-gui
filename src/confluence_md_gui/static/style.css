@@ -185,6 +185,12 @@ button.loading::after { content: ""; position: absolute; inset: 0; margin: auto;
 .preview aside { padding: 16px; border-right: 1px solid var(--line); background: #f8fcfe; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 #file-list { list-style: none; margin: 0; padding: 0; overflow: auto; max-height: 62vh; }
 #file-list li { display: flex; gap: 8px; align-items: flex-start; padding: 7px 8px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+.zip-bar input[type=checkbox], #file-list input[type=checkbox] { width: 15px; height: 15px; padding: 0; flex: none; }
+.zip-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.zip-all { display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 0; }
+.zip-all .hint { margin: 0; white-space: nowrap; }
+#file-list li .zip-pick { margin: 3px 0 0; flex: none; cursor: pointer; accent-color: var(--curious); }
+#file-list li.active .zip-pick { accent-color: var(--milk); }
 #file-list li svg { width: 16px; height: 16px; color: var(--curious); margin-top: 1px; }
 #file-list li .path { display: flex; flex-direction: column; min-width: 0; }
 #file-list li .path small { color: var(--granite); font-size: 11.5px; word-break: break-all; }
