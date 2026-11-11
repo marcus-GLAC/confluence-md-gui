@@ -5,12 +5,14 @@ export page/space, kiểm tra link ảnh, xem trước .md và đẩy lên GitHu
 
 Chạy:  cme-gui                   → mở trình duyệt
        cme-gui --port 8000      → cố định cổng
+       cme-gui --server         → chế độ máy chủ nhiều người dùng (xem DEPLOY.md)
        cme-gui cme ...          → chạy thẳng CLI cme
 """
 
 from __future__ import annotations
 
 import base64
+import fnmatch
 import hashlib
 import html
 import argparse
@@ -19,10 +21,12 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -42,16 +46,35 @@ DEFAULT_OUTPUT = r"C:\cme-export" if os.name == "nt" else str(Path.home() / "cme
 # API tạo blob của GitHub từ chối file lớn (thực tế khoảng 40MB sau khi mã hoá base64).
 GITHUB_MAX_FILE = 40 * 1024 * 1024
 EXPORT_MODES = {"pages", "pages-with-descendants", "folders", "spaces"}
-SESSION = secrets.token_urlsafe(24)
 # Client ID của GitHub OAuth App (bật Device Flow). Không phải bí mật, được phép công khai.
 GITHUB_CLIENT_ID = os.environ.get("CME_GUI_GITHUB_CLIENT_ID", "Ov23liFG0NmCelT4uXMu")
 KEYRING_USER = "github-token"
 
 
+class Server:
+    """Cấu hình chế độ máy chủ (--server). Mặc định tắt: app chạy local cho một người như trước."""
+
+    enabled = False
+    data_dir = Path(os.environ.get("CME_GUI_DATA_DIR", "/data"))
+    # Chỉ cho phép export từ các Confluence này (chặn dùng máy chủ để gọi tới địa chỉ nội bộ).
+    allowed_hosts = [h.strip().lower() for h in os.environ.get("CME_GUI_ALLOWED_HOSTS", "*.atlassian.net").split(",")
+                     if h.strip()]
+    password = os.environ.get("CME_GUI_PASSWORD", "")
+    secure_cookie = os.environ.get("CME_GUI_SECURE_COOKIE", "1") != "0"
+    session_ttl = float(os.environ.get("CME_GUI_SESSION_TTL_HOURS", "12")) * 3600
+    idle_ttl = 3600  # phiên chưa từng export: dọn sau 1 giờ không dùng
+    exports = threading.BoundedSemaphore(max(1, int(os.environ.get("CME_GUI_MAX_EXPORTS", "2"))))
+    output_label = "Thư mục tạm trên máy chủ"
+
+
 # ---------------------------------------------------------------- settings
 
+def load_defaults() -> dict:
+    return {"base_url": "", "email": "", "output": DEFAULT_OUTPUT, "repo": "", "branch": "main", "subdir": ""}
+
+
 def load_settings() -> dict:
-    defaults = {"base_url": "", "email": "", "output": DEFAULT_OUTPUT, "repo": "", "branch": "main", "subdir": ""}
+    defaults = load_defaults()
     try:
         defaults.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
     except (OSError, ValueError):
@@ -59,8 +82,12 @@ def load_settings() -> dict:
     return defaults
 
 
-def save_settings(values: dict) -> None:
+def save_settings(values: dict, sess: "Session | None" = None) -> None:
     # Token không bao giờ được lưu xuống đĩa.
+    if Server.enabled:  # máy chủ: mỗi người một bộ cài đặt, chỉ giữ trong RAM
+        sess.settings.update({k: v for k, v in values.items()
+                              if k in ("base_url", "email", "repo", "branch", "subdir") and isinstance(v, str)})
+        return
     current = load_settings()
     current.update({k: v for k, v in values.items() if k in current and isinstance(v, str)})
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -72,11 +99,9 @@ def save_settings(values: dict) -> None:
 class Job:
     """Một tác vụ chạy nền (export hoặc push) với log để giao diện hỏi định kỳ."""
 
-    lock = threading.Lock()
-    current: "Job | None" = None
-
-    def __init__(self, kind: str):
+    def __init__(self, kind: str, sess: "Session"):
         self.kind = kind
+        self.session = sess
         self.lines: list[str] = []
         self.running = True
         self.ok: bool | None = None
@@ -91,13 +116,18 @@ class Job:
         self.ok = ok
         self.running = False
 
-    @classmethod
-    def start(cls, kind: str, target, *args) -> "Job":
-        with cls.lock:
-            if cls.current and cls.current.running:
+    def cancel(self) -> None:
+        if self.running:
+            self.cancelled = True
+            if self.proc and self.proc.poll() is None:
+                self.proc.terminate()
+
+    @staticmethod
+    def start(sess: "Session", kind: str, target, *args) -> "Job":
+        with sess.lock:
+            if sess.busy():
                 raise ValueError("Đang có một tác vụ chạy, vui lòng đợi hoặc bấm Dừng.")
-            job = cls(kind)
-            cls.current = job
+            job = sess.job = Job(kind, sess)
 
         def runner():
             try:
@@ -115,14 +145,33 @@ def cme_command(*args: str) -> list[str]:
 
 
 def run_export(job: Job, p: dict) -> bool:
+    if not Server.enabled:
+        return _run_export(job, p)
+    # Giới hạn số lượt export chạy cùng lúc để máy chủ nhỏ không quá tải.
+    waiting = False
+    while not Server.exports.acquire(timeout=1):
+        if job.cancelled:
+            job.log("⏹ Đã dừng.")
+            return False
+        if not waiting:
+            job.log("⏳ Máy chủ đang bận export cho người khác, đang chờ tới lượt…")
+            waiting = True
+    try:
+        return _run_export(job, p)
+    finally:
+        Server.exports.release()
+
+
+def _run_export(job: Job, p: dict) -> bool:
     base_url = p["base_url"].strip().rstrip("/")
     output = Path(p["output"]).expanduser()
     output.mkdir(parents=True, exist_ok=True)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    config_file = job.session.cme_config
+    config_file.parent.mkdir(parents=True, exist_ok=True)
 
     env = dict(os.environ)
     env.update({
-        "CME_CONFIG_PATH": str(CME_CONFIG_FILE),
+        "CME_CONFIG_PATH": str(config_file),
         "CME_NON_INTERACTIVE": "1",
         "NO_COLOR": "1",
         "CI": "true",
@@ -135,7 +184,7 @@ def run_export(job: Job, p: dict) -> bool:
     })
     cmd = cme_command(p["mode"], p["target_url"].strip())
     job.log(f"▶ cme {p['mode']} {p['target_url'].strip()}")
-    job.log(f"  Thư mục lưu: {output}")
+    job.log(f"  Thư mục lưu: {Server.output_label if Server.enabled else output}")
 
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     job.proc = subprocess.Popen(
@@ -173,7 +222,8 @@ def safe_path(root: Path, rel: str) -> Path:
 def check_links(output: Path, strip_query: bool) -> dict:
     report = {"files": 0, "images": 0, "remote": [], "query": [], "missing": [], "too_big": [], "fixed": 0}
     if not output.is_dir():
-        raise ValueError(f"Không tìm thấy thư mục {output}")
+        raise ValueError("Chưa có kết quả export nào. Hãy export trước." if Server.enabled
+                         else f"Không tìm thấy thư mục {output}")
     for md in sorted(output.rglob("*.md")):
         rel_md = md.relative_to(output).as_posix()
         text = md.read_text(encoding="utf-8", errors="replace")
@@ -343,68 +393,67 @@ def keyring_backend():
 
 
 class GitHubSession:
-    """Giữ token GitHub trong bộ nhớ của tiến trình; trình duyệt không bao giờ thấy token."""
+    """Giữ token GitHub trong bộ nhớ của tiến trình (mỗi phiên một bản); trình duyệt không bao giờ thấy token."""
 
-    lock = threading.Lock()
-    token = ""
-    user: dict = {}
-    remembered = False
-    device: dict = {}
+    def __init__(self, use_keyring: bool):
+        self.lock = threading.Lock()
+        self.use_keyring = use_keyring  # chế độ máy chủ: không bao giờ ghi token xuống kho mật khẩu
+        self.token = ""
+        self.user: dict = {}
+        self.remembered = False
+        self.device: dict = {}
 
-    @classmethod
-    def status(cls) -> dict:
+    def keyring(self):
+        return keyring_backend() if self.use_keyring else None
+
+    def status(self) -> dict:
         return {
-            "logged_in": bool(cls.token), "login": cls.user.get("login", ""), "avatar": cls.user.get("avatar_url", ""),
-            "name": cls.user.get("name") or "", "remembered": cls.remembered,
-            "can_remember": keyring_backend() is not None, "device_enabled": bool(GITHUB_CLIENT_ID),
+            "logged_in": bool(self.token), "login": self.user.get("login", ""), "avatar": self.user.get("avatar_url", ""),
+            "name": self.user.get("name") or "", "remembered": self.remembered,
+            "can_remember": self.keyring() is not None, "device_enabled": bool(GITHUB_CLIENT_ID),
         }
 
-    @classmethod
-    def login(cls, token: str, remember: bool) -> dict:
+    def login(self, token: str, remember: bool) -> dict:
         token = token.strip()
         status, user = gh_api("GET", "/user", token)
         if status != 200:
             raise ValueError("Token GitHub không hợp lệ hoặc đã hết hạn.")
-        with cls.lock:
-            cls.token, cls.user, cls.remembered = token, user, False
-        kr = keyring_backend()
+        with self.lock:
+            self.token, self.user, self.remembered = token, user, False
+        kr = self.keyring()
         if remember and kr:
             kr.set_password(APP_NAME, KEYRING_USER, token)
-            cls.remembered = True
-        return cls.status()
+            self.remembered = True
+        return self.status()
 
-    @classmethod
-    def logout(cls) -> None:
-        with cls.lock:
-            cls.token, cls.user, cls.remembered, cls.device = "", {}, False, {}
-        kr = keyring_backend()
+    def logout(self) -> None:
+        with self.lock:
+            self.token, self.user, self.remembered, self.device = "", {}, False, {}
+        kr = self.keyring()
         if kr:
             try:
                 kr.delete_password(APP_NAME, KEYRING_USER)
             except Exception:  # noqa: BLE001 - chưa lưu thì bỏ qua
                 pass
 
-    @classmethod
-    def restore(cls) -> None:
-        kr = keyring_backend()
+    def restore(self) -> None:
+        kr = self.keyring()
         if not kr:
             return
         try:
             token = kr.get_password(APP_NAME, KEYRING_USER)
             if token:
-                cls.login(token, remember=True)
+                self.login(token, remember=True)
         except Exception:  # noqa: BLE001 - token cũ không dùng được thì bắt đăng nhập lại
             pass
 
-    @classmethod
-    def require(cls) -> str:
-        if not cls.token:
+    def require(self) -> str:
+        if not self.token:
             raise ValueError("Bạn chưa đăng nhập GitHub.")
-        return cls.token
+        return self.token
 
     # -- Device Flow: https://docs.github.com/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow
-    @classmethod
-    def device_start(cls, remember: bool) -> dict:
+    def device_start(self, remember: bool) -> dict:
         if not GITHUB_CLIENT_ID:
             raise ValueError("Chưa cấu hình GitHub OAuth App cho tính năng đăng nhập.")
         try:
@@ -414,18 +463,15 @@ class GitHubSession:
         if "device_code" not in data:
             raise ValueError(data.get("error_description") or "GitHub không cấp được mã đăng nhập.")
         state = {"state": "pending", "message": "", "id": secrets.token_hex(4)}
-        cls.device = state
-        threading.Thread(target=cls._device_poll, args=(data, remember, state), daemon=True).start()
+        self.device = state
+        threading.Thread(target=self._device_poll, args=(data, remember, state), daemon=True).start()
         return {"user_code": data["user_code"], "verification_uri": data["verification_uri"],
                 "expires_in": data["expires_in"]}
 
-    @classmethod
-    def _device_poll(cls, data: dict, remember: bool, state: dict) -> None:
-        import time
-
+    def _device_poll(self, data: dict, remember: bool, state: dict) -> None:
         interval = int(data.get("interval", 5))
         deadline = time.time() + int(data.get("expires_in", 900))
-        while time.time() < deadline and cls.device is state:
+        while time.time() < deadline and self.device is state:
             time.sleep(interval)
             try:
                 r = form_post("https://github.com/login/oauth/access_token", {
@@ -434,9 +480,11 @@ class GitHubSession:
                 })
             except (urllib.error.URLError, ValueError):
                 continue
+            if self.device is not state:  # đã đăng xuất / phiên bị dọn trong lúc chờ
+                return
             if "access_token" in r:
                 try:
-                    cls.login(r["access_token"], remember)
+                    self.login(r["access_token"], remember)
                     state["state"] = "ok"
                 except ValueError as exc:
                     state.update(state="error", message=str(exc))
@@ -448,8 +496,81 @@ class GitHubSession:
                 messages = {"access_denied": "Bạn đã từ chối cấp quyền.", "expired_token": "Mã đã hết hạn, hãy thử lại."}
                 state.update(state="error", message=messages.get(err, r.get("error_description") or err))
                 return
-        if cls.device is state and state["state"] == "pending":
+        if self.device is state and state["state"] == "pending":
             state.update(state="error", message="Mã đã hết hạn, hãy thử lại.")
+
+
+class Session:
+    """Trạng thái của một người dùng: token GitHub, tác vụ, cài đặt và thư mục làm việc.
+
+    Chạy local chỉ có đúng một phiên (thư mục do người dùng chọn). Chế độ máy chủ: mỗi trình duyệt một phiên,
+    thư mục riêng do máy chủ cấp, xoá hẳn khi phiên hết hạn.
+    """
+
+    registry: "dict[str, Session]" = {}
+    registry_lock = threading.Lock()
+
+    def __init__(self, root: Path | None):
+        self.id = secrets.token_urlsafe(24)
+        self.lock = threading.Lock()
+        self.job: Job | None = None
+        self.gh = GitHubSession(use_keyring=root is None)
+        self.settings: dict = {}
+        self.root = root  # None = chạy local
+        self.last_seen = time.time()
+
+    @property
+    def output(self) -> Path:
+        return self.root / "export"
+
+    @property
+    def cme_config(self) -> Path:
+        return CME_CONFIG_FILE if self.root is None else self.root / "cme_config.json"
+
+    def busy(self) -> bool:
+        return bool(self.job and self.job.running)
+
+    @classmethod
+    def create(cls) -> "Session":
+        sess = cls(Server.data_dir / "sessions" / secrets.token_hex(12))
+        with cls.registry_lock:
+            cls.registry[sess.id] = sess
+        return sess
+
+    @classmethod
+    def get(cls, sid: str) -> "Session | None":
+        with cls.registry_lock:
+            sess = next((v for k, v in cls.registry.items() if secrets.compare_digest(k, sid)), None)
+        if sess:
+            sess.last_seen = time.time()
+        return sess
+
+    def destroy(self) -> None:
+        if self.job:
+            self.job.cancel()
+            if self.job.proc:
+                try:
+                    self.job.proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.job.proc.kill()
+        self.gh.logout()
+        if self.root:
+            shutil.rmtree(self.root, ignore_errors=True)
+
+    @classmethod
+    def reap(cls) -> None:
+        """Dọn các phiên hết hạn: xoá token khỏi RAM và xoá toàn bộ tài liệu đã export trên đĩa."""
+        now = time.time()
+        with cls.registry_lock:
+            expired = [s for s in cls.registry.values() if not s.busy() and now - s.last_seen > (
+                Server.session_ttl if s.root.exists() else Server.idle_ttl)]
+            for s in expired:
+                del cls.registry[s.id]
+        for s in expired:
+            s.destroy()
+
+
+LOCAL = Session(None)
 
 
 def list_repos(token: str) -> list[dict]:
@@ -766,12 +887,13 @@ def git_blob_sha(data: bytes) -> str:
 
 
 def run_push(job: Job, p: dict) -> bool:
-    token, repo = GitHubSession.require(), parse_repo(p["repo"])
+    token, repo = job.session.gh.require(), parse_repo(p["repo"])
     branch = p.get("branch", "").strip() or "main"
     subdir = p.get("subdir", "").strip().strip("/")
     output = Path(p["output"]).expanduser()
     if not output.is_dir():
-        raise ValueError(f"Không tìm thấy thư mục {output}")
+        raise ValueError("Chưa có kết quả export nào. Hãy export trước." if Server.enabled
+                         else f"Không tìm thấy thư mục {output}")
 
     info = github_check(repo, token)
     if not info["private"] and not p.get("allow_public"):
@@ -896,15 +1018,55 @@ def run_push(job: Job, p: dict) -> bool:
 
 # ---------------------------------------------------------------- http server
 
+def check_host(url: str, what: str) -> str:
+    """Chế độ máy chủ: chỉ cho phép Confluence nằm trong danh sách CME_GUI_ALLOWED_HOSTS."""
+    parsed = urllib.parse.urlparse(url.strip())
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not host:
+        raise ValueError(f"{what} phải bắt đầu bằng https://")
+    if not any(fnmatch.fnmatchcase(host, pattern) for pattern in Server.allowed_hosts):
+        raise ValueError(f"Máy chủ này chỉ cho phép export từ: {', '.join(Server.allowed_hosts)} (không có {host}).")
+    return host
+
+
+def check_export_target(p: dict) -> None:
+    if not Server.enabled:
+        return
+    base = check_host(p["base_url"], "Địa chỉ Confluence")
+    if check_host(p["target_url"], "Link trang") != base:
+        raise ValueError("Link trang phải thuộc cùng Confluence với địa chỉ đã kết nối.")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = APP_NAME
 
     def log_message(self, fmt, *args):  # giữ console gọn
         pass
 
-    def _authorized(self) -> bool:
+    def _cookie_session(self) -> "Session | None":
         cookie = SimpleCookie(self.headers.get("Cookie", ""))
-        return "session" in cookie and secrets.compare_digest(cookie["session"].value, SESSION)
+        if "session" not in cookie:
+            return None
+        sid = cookie["session"].value
+        if Server.enabled:
+            return Session.get(sid)
+        return LOCAL if secrets.compare_digest(sid, LOCAL.id) else None
+
+    def _password_ok(self) -> bool:
+        """Lớp mật khẩu chung (HTTP Basic) khi không có Cloudflare Access hay cổng đăng nhập nào phía trước."""
+        if not (Server.enabled and Server.password):
+            return True
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Basic "):
+            try:
+                _, _, given = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+            except (ValueError, UnicodeDecodeError):
+                return False
+            if secrets.compare_digest(given.encode(), Server.password.encode()):
+                return True
+        self._send(401, "Cần mật khẩu để dùng công cụ này.".encode(), "text/plain; charset=utf-8",
+                   {"WWW-Authenticate": 'Basic realm="Confluence -> Markdown", charset="UTF-8"'})
+        return False
 
     def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
         self.send_response(status)
@@ -926,12 +1088,36 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(length) or b"{}")
 
+    @staticmethod
+    def _message(exc: Exception) -> str:
+        # Máy chủ: lỗi file chứa đường dẫn thật trên đĩa → không trả về cho trình duyệt.
+        if Server.enabled and isinstance(exc, OSError):
+            return "Không tìm thấy file hoặc chưa có kết quả export."
+        return str(exc)
+
+    @staticmethod
+    def _pin_output(sess: "Session", params: dict) -> None:
+        # Chế độ máy chủ: bỏ qua mọi đường dẫn trình duyệt gửi lên, luôn dùng thư mục riêng của phiên.
+        if Server.enabled:
+            params["output"] = str(sess.output)
+
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
+        if url.path == "/healthz":
+            return self._send(200, b"ok", "text/plain")
+        if not self._password_ok():
+            return
         q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
         if url.path in ("/", "/index.html"):
             page = (STATIC_DIR / "index.html").read_bytes()
-            cookie = f"session={SESSION}; Path=/; HttpOnly; SameSite=Strict"
+            sess = self._cookie_session() or (Session.create() if Server.enabled else LOCAL)
+            cookie = f"session={sess.id}; Path=/; HttpOnly; SameSite=Strict"
+            if Server.enabled:
+                # Lax: mở link từ Slack/email hay quay về từ trang đăng nhập Cloudflare Access vẫn giữ phiên cũ
+                # (Strict sẽ không gửi cookie → tạo phiên mới, mất kết quả export). POST khác site vẫn bị chặn.
+                cookie = cookie.replace("SameSite=Strict", "SameSite=Lax")
+                if Server.secure_cookie:
+                    cookie += "; Secure"
             # Phần xem trước chèn HTML từ Confluence: CSP chặn mọi script lạ trong đó.
             csp = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
                    "img-src 'self' https: data:; font-src 'self'")
@@ -945,23 +1131,30 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, f.read_bytes(), ctype)
             except (ValueError, OSError):
                 return self._error("Không tìm thấy", 404)
-        if not self._authorized():
-            return self._error("Phiên không hợp lệ, hãy tải lại trang.", 403)
+        sess = self._cookie_session()
+        if not sess:
+            return self._error("Phiên không hợp lệ hoặc đã hết hạn, hãy tải lại trang.", 403)
+        self._pin_output(sess, q)
+        gh = sess.gh
         try:
             if url.path == "/api/settings":
                 from confluence_md_gui import __version__
 
-                return self._json({**load_settings(), "version": __version__})
+                if Server.enabled:
+                    settings = {**load_defaults(), **sess.settings, "output": Server.output_label}
+                else:
+                    settings = load_settings()
+                return self._json({**settings, "version": __version__, "server_mode": Server.enabled})
             if url.path == "/api/gh/status":
-                return self._json(GitHubSession.status())
+                return self._json(gh.status())
             if url.path == "/api/gh/device":
-                return self._json({k: v for k, v in GitHubSession.device.items() if k != "id"} or {"state": "idle"})
+                return self._json({k: v for k, v in gh.device.items() if k != "id"} or {"state": "idle"})
             if url.path == "/api/gh/repos":
-                return self._json({"repos": list_repos(GitHubSession.require())})
+                return self._json({"repos": list_repos(gh.require())})
             if url.path == "/api/stats":
                 return self._json(export_stats(Path(q["output"]).expanduser()))
             if url.path == "/api/job":
-                job = Job.current
+                job = sess.job
                 if not job:
                     return self._json({"running": False, "lines": [], "total": 0})
                 since = int(q.get("since", 0))
@@ -981,45 +1174,48 @@ class Handler(BaseHTTPRequestHandler):
                          ".svg": "image/svg+xml", ".webp": "image/webp"}.get(f.suffix.lower(), "application/octet-stream")
                 return self._send(200, f.read_bytes(), ctype)
         except (ValueError, OSError, KeyError) as exc:
-            return self._error(str(exc))
+            return self._error(self._message(exc))
         self._error("Không tìm thấy", 404)
 
     def do_POST(self):
-        if not self._authorized():
-            return self._error("Phiên không hợp lệ, hãy tải lại trang.", 403)
+        if not self._password_ok():
+            return
+        sess = self._cookie_session()
+        if not sess:
+            return self._error("Phiên không hợp lệ hoặc đã hết hạn, hãy tải lại trang.", 403)
         path = urllib.parse.urlparse(self.path).path
+        gh = sess.gh
         try:
             p = self._body()
+            self._pin_output(sess, p)
             if path == "/api/export":
                 for key in ("base_url", "email", "token", "target_url", "output"):
                     if not str(p.get(key, "")).strip():
                         raise ValueError(f"Thiếu thông tin: {key}")
                 if p.get("mode") not in EXPORT_MODES:
                     raise ValueError("Kiểu export không hợp lệ.")
-                save_settings(p)
-                Job.start("export", run_export, p)
+                check_export_target(p)
+                save_settings(p, sess)
+                Job.start(sess, "export", run_export, p)
                 return self._json({"started": True})
             if path == "/api/push":
-                GitHubSession.require()
+                gh.require()
                 for key in ("repo", "output"):
                     if not str(p.get(key, "")).strip():
                         raise ValueError(f"Thiếu thông tin: {key}")
-                save_settings(p)
-                Job.start("push", run_push, p)
+                save_settings(p, sess)
+                Job.start(sess, "push", run_push, p)
                 return self._json({"started": True})
             if path == "/api/cancel":
-                job = Job.current
-                if job and job.running:
-                    job.cancelled = True
-                    if job.proc and job.proc.poll() is None:
-                        job.proc.terminate()
+                if sess.job:
+                    sess.job.cancel()
                 return self._json({"ok": True})
             if path == "/api/doc/rename":
                 return self._json(rename_document(Path(p["output"]).expanduser(), p["path"], p["name"]))
             if path == "/api/layout":
                 return self._json({"layout": save_layout(Path(p["output"]).expanduser(), p.get("repo", ""), p["layout"])})
             if path == "/api/doc/delete":
-                if Job.current and Job.current.running:
+                if sess.busy():
                     raise ValueError("Đang có tác vụ chạy, vui lòng đợi xong rồi xoá.")
                 return self._json(delete_document(Path(p["output"]).expanduser(), p["path"]))
             if path == "/api/zip":
@@ -1029,21 +1225,23 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/check-links":
                 return self._json(check_links(Path(p["output"]).expanduser(), bool(p.get("strip_query"))))
             if path == "/api/confluence-check":
-                save_settings(p)
+                if Server.enabled:
+                    check_host(p["base_url"], "Địa chỉ Confluence")
+                save_settings(p, sess)
                 return self._json(confluence_check(p["base_url"], p["email"], p["token"]))
             if path == "/api/github-check":
-                return self._json(github_check(p["repo"], GitHubSession.require()))
+                return self._json(github_check(p["repo"], gh.require()))
             if path == "/api/gh/token":
-                return self._json(GitHubSession.login(p["token"], bool(p.get("remember"))))
+                return self._json(gh.login(p["token"], bool(p.get("remember"))))
             if path == "/api/gh/device":
-                return self._json(GitHubSession.device_start(bool(p.get("remember"))))
+                return self._json(gh.device_start(bool(p.get("remember"))))
             if path == "/api/gh/logout":
-                GitHubSession.logout()
-                return self._json(GitHubSession.status())
+                gh.logout()
+                return self._json(gh.status())
             if path == "/api/gh/create-repo":
-                return self._json(create_repo(GitHubSession.require(), p["name"], bool(p.get("private", True))))
+                return self._json(create_repo(gh.require(), p["name"], bool(p.get("private", True))))
         except (ValueError, OSError, KeyError) as exc:
-            return self._error(str(exc))
+            return self._error(self._message(exc))
         self._error("Không tìm thấy", 404)
 
 
@@ -1055,13 +1253,43 @@ def free_port() -> int:
 
 def serve(port: int, open_browser: bool) -> None:
     port = port or free_port()
-    GitHubSession.restore()
+    LOCAL.gh.restore()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server.daemon_threads = True
     url = f"http://127.0.0.1:{port}/"
     print(f"Confluence → Markdown đang chạy tại {url}")
     print("Đóng cửa sổ này (hoặc Ctrl+C) để thoát.")
     if open_browser:
         threading.Timer(0.5, webbrowser.open, args=(url,)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+def serve_multi(host: str, port: int) -> None:
+    """Chế độ máy chủ: nhiều người dùng, mỗi trình duyệt một phiên riêng."""
+    Server.enabled = True
+    sessions_dir = Server.data_dir / "sessions"
+    # Phiên chỉ sống trong RAM: dữ liệu của các lần chạy trước không còn ai dùng được nữa → xoá.
+    shutil.rmtree(sessions_dir, ignore_errors=True)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    def reaper():
+        while True:
+            time.sleep(300)
+            try:
+                Session.reap()
+            except Exception as exc:  # noqa: BLE001 - không để luồng dọn dẹp chết
+                print(f"Lỗi khi dọn phiên: {exc}", file=sys.stderr)
+
+    threading.Thread(target=reaper, daemon=True).start()
+    server = ThreadingHTTPServer((host, port), Handler)
+    server.daemon_threads = True
+    print(f"Confluence → Markdown (chế độ máy chủ) đang chạy tại http://{host}:{port}/")
+    print(f"  Dữ liệu: {Server.data_dir} · Confluence cho phép: {', '.join(Server.allowed_hosts)}")
+    if not Server.password:
+        print("  ⚠ Chưa đặt CME_GUI_PASSWORD: hãy chắc chắn có cổng đăng nhập (vd. Cloudflare Access) phía trước.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1078,11 +1306,17 @@ def main() -> None:
     from confluence_md_gui import __version__
 
     parser = argparse.ArgumentParser(prog="cme-gui", description="Giao diện web export Confluence → Markdown → GitHub.")
-    parser.add_argument("--port", type=int, default=0, help="cổng chạy (mặc định: chọn ngẫu nhiên)")
+    parser.add_argument("--port", type=int, default=0,
+                        help="cổng chạy (mặc định: chọn ngẫu nhiên; chế độ máy chủ: $PORT hoặc 8080)")
     parser.add_argument("--no-browser", action="store_true", help="không tự mở trình duyệt")
+    parser.add_argument("--server", action="store_true", help="chế độ máy chủ nhiều người dùng (xem DEPLOY.md)")
+    parser.add_argument("--host", default="0.0.0.0", help="địa chỉ lắng nghe ở chế độ máy chủ (mặc định 0.0.0.0)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args()
-    serve(args.port, not args.no_browser)
+    if args.server:
+        serve_multi(args.host, args.port or int(os.environ.get("PORT") or 8080))
+    else:
+        serve(args.port, not args.no_browser)
 
 
 if __name__ == "__main__":

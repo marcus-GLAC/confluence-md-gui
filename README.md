@@ -39,6 +39,10 @@ Bạn cần chuẩn bị:
 
 Token chỉ được lưu khi bạn chọn **Ghi nhớ đăng nhập** (lưu trong kho mật khẩu của hệ điều hành).
 
+## Dùng chung cho cả team
+
+Có thể chạy công cụ trên máy chủ để cả team dùng qua một đường link (mỗi người một phiên riêng). Xem [DEPLOY.md](DEPLOY.md).
+
 ## Cập nhật / gỡ cài đặt
 
 ```bash
