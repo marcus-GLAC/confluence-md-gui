@@ -5,6 +5,8 @@ const icon = (name, cls = "") => `<svg class="${cls}"><use href="#i-${name}"/></
 const STEPS = ["connect", "export", "links", "preview", "github"];
 const MODE_LABELS = { pages: "Một trang", "pages-with-descendants": "Trang + trang con", folders: "Folder", spaces: "Cả space" };
 
+let serverMode = false;
+
 async function api(path, body) {
   const res = await fetch(path, body === undefined ? {} : {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -210,7 +212,9 @@ jobHandlers.export = async (job) => {
   toast("Export hoàn tất.", "ok");
   try {
     const s = await api("/api/stats?output=" + encodeURIComponent(val("output")));
-    $("export-result-path").textContent = val("output");
+    $("export-result-path").textContent = serverMode
+      ? "Lưu tạm trên máy chủ, tự xoá sau một thời gian không dùng. Hãy tải .zip hoặc đẩy lên GitHub để giữ lại."
+      : val("output");
     $("export-stats").innerHTML = statCards([
       [s.pages, "trang Markdown"], [s.images, "hình ảnh"], [s.other, "file đính kèm khác"], [formatBytes(s.bytes), "tổng dung lượng"],
     ]);
@@ -1065,6 +1069,9 @@ jobHandlers.push = (job) => {
     const s = await api("/api/settings");
     for (const k of ["base_url", "email", "output", "repo", "branch", "subdir"]) if (s[k]) $(k).value = s[k];
     $("version").textContent = "v" + s.version;
+    serverMode = !!s.server_mode;
+    // Máy chủ tự cấp thư mục riêng cho mỗi phiên: không cho chọn đường dẫn.
+    $("output-field").hidden = serverMode;
     refreshGitHub().catch(() => {});
     if (location.hash === "#github") loadDocs(true);
     const job = await api("/api/job");

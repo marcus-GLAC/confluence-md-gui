@@ -1,0 +1,25 @@
+# Chạy trên VPS: app KHÔNG mở cổng ra ngoài, chỉ cloudflared đi ra Cloudflare.
+# Người dùng vào qua https://<tên-miền> và phải đăng nhập Cloudflare Access trước. Xem DEPLOY.md.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      CME_GUI_ALLOWED_HOSTS: ${CME_GUI_ALLOWED_HOSTS:-*.atlassian.net}
+      CME_GUI_MAX_EXPORTS: ${CME_GUI_MAX_EXPORTS:-2}
+      CME_GUI_SESSION_TTL_HOURS: ${CME_GUI_SESSION_TTL_HOURS:-12}
+      CME_GUI_PASSWORD: ${CME_GUI_PASSWORD:-}
+    volumes:
+      - data:/data
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Đặt TUNNEL_TOKEN trong file .env}
+    depends_on:
+      - app
+
+volumes:
+  data:
